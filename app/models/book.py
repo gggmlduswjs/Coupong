@@ -1,0 +1,155 @@
+"""도서 원본 데이터 모델"""
+from sqlalchemy import Column, Integer, String, Text, Date, Boolean, DateTime, ForeignKey
+from sqlalchemy.orm import relationship
+from datetime import datetime
+from app.database import Base
+import re
+
+
+class Book(Base):
+    """도서 원본 데이터 (알라딘 API)"""
+    __tablename__ = "books"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    # 기본 정보
+    isbn = Column(String(13), unique=True, nullable=False, index=True)
+    title = Column(String(500), nullable=False)
+    author = Column(String(200))
+    publisher_id = Column(Integer, ForeignKey('publishers.id'), index=True)
+    publisher_name = Column(String(100), index=True)  # 검색 편의용
+
+    # 가격
+    list_price = Column(Integer, nullable=False)  # 정가
+
+    # 분류
+    category = Column(String(100))
+    subcategory = Column(String(100))
+
+    # 연도 및 정규화 (묶음 SKU용)
+    year = Column(Integer, index=True)  # 2024, 2025 등
+    normalized_title = Column(String(500))  # 연도 제거된 제목
+    normalized_series = Column(String(200), index=True)  # 시리즈명
+
+    # 메타데이터
+    image_url = Column(Text)
+    description = Column(Text)
+    source_url = Column(Text)  # 알라딘 URL
+    publish_date = Column(Date)
+    page_count = Column(Integer)
+
+    # 상태
+    is_processed = Column(Boolean, default=False, index=True)
+    crawled_at = Column(DateTime, default=datetime.utcnow)
+
+    # Relationships
+    publisher = relationship("Publisher", back_populates="books")
+    products = relationship("Product", back_populates="book")
+
+    def __repr__(self):
+        return f"<Book(isbn='{self.isbn}', title='{self.title[:30]}')>"
+
+    @staticmethod
+    def extract_year(title: str) -> int:
+        """
+        제목에서 연도 추출
+
+        예:
+            "2025 수능완성 국어영역" → 2025
+            "개념원리 수학(상) 2024" → 2024
+            "EBS 고등 예비과정 24년도" → 2024
+        """
+        # 4자리 연도 패턴 (2020~2030)
+        patterns = [
+            r'(202[0-9])',  # 2020~2029
+            r'(203[0])',    # 2030
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, title)
+            if match:
+                return int(match.group(1))
+
+        # 2자리 연도 패턴 (24 → 2024)
+        match = re.search(r'[^\d]([2][0-9])(?:년|학년도)?', title)
+        if match:
+            year_suffix = int(match.group(1))
+            return 2000 + year_suffix
+
+        return None
+
+    @staticmethod
+    def normalize_title(title: str, year: int = None) -> str:
+        """
+        제목 정규화 (연도 제거)
+
+        예:
+            "2025 수능완성 국어영역" → "수능완성 국어영역"
+            "개념원리 수학(상) 2024" → "개념원리 수학(상)"
+        """
+        normalized = title
+
+        if year:
+            # 4자리 연도 제거
+            normalized = re.sub(rf'\b{year}\b', '', normalized)
+            # 2자리 연도 제거 (24년, 24학년도 등)
+            year_suffix = year % 100
+            normalized = re.sub(rf'\b{year_suffix}(?:년도?|학년도)?\b', '', normalized)
+
+        # 공백 정리
+        normalized = re.sub(r'\s+', ' ', normalized).strip()
+
+        return normalized
+
+    @staticmethod
+    def extract_series(normalized_title: str) -> str:
+        """
+        시리즈명 추출 (묶음용)
+
+        예:
+            "개념원리 수학(상)" → "개념원리 수학"
+            "EBS 수능완성 국어영역" → "EBS 수능완성"
+        """
+        # 괄호 제거
+        series = re.sub(r'\([^)]*\)', '', normalized_title)
+
+        # 영역/과목 제거
+        series = re.sub(r'(국어|영어|수학|과학|사회|역사|지리|생물|화학|물리|지구과학)영역', '', series)
+
+        # 권수 제거
+        series = re.sub(r'[상중하]권?', '', series)
+        series = re.sub(r'\d+권', '', series)
+
+        # 공백 정리
+        series = re.sub(r'\s+', ' ', series).strip()
+
+        return series
+
+    def process_metadata(self):
+        """메타데이터 자동 처리"""
+        # 연도 추출
+        if not self.year:
+            self.year = self.extract_year(self.title)
+
+        # 제목 정규화
+        if not self.normalized_title:
+            self.normalized_title = self.normalize_title(self.title, self.year)
+
+        # 시리즈명 추출
+        if not self.normalized_series and self.normalized_title:
+            self.normalized_series = self.extract_series(self.normalized_title)
+
+    @property
+    def sale_price(self):
+        """판매가 (도서정가제)"""
+        return int(self.list_price * 0.9)
+
+    def calculate_margin(self, publisher=None):
+        """마진 계산 (출판사 정보 필요)"""
+        if not publisher and self.publisher:
+            publisher = self.publisher
+
+        if publisher:
+            return publisher.calculate_margin(self.list_price)
+
+        return None

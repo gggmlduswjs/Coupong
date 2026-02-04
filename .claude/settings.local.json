@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(tree:*)",
+      "Bash(python:*)",
+      "Bash(pip install:*)",
+      "Bash(playwright install:*)",
+      "Bash(chcp:*)",
+      "Bash(PYTHONIOENCODING=utf-8 python:*)",
+      "WebFetch(domain:www.kyobobook.co.kr)",
+      "Bash(wc:*)",
+      "Bash(ls:*)",
+      "Bash(PYTHONIOENCODING=utf-8 timeout 60 python:*)",
+      "Bash(set PYTHONIOENCODING=utf-8)",
+      "Bash(git init:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)"
+    ]
+  }
+}

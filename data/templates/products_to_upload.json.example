@@ -1,0 +1,18 @@
+[
+  {
+    "product_name": "초등 수학 문제집 3학년",
+    "sale_price": 15000,
+    "original_price": 15000,
+    "isbn": "9781234567890",
+    "description": "초등학교 3학년 수학 문제집입니다.",
+    "main_image_url": "https://example.com/image.jpg"
+  },
+  {
+    "product_name": "중학 영어 문법서",
+    "sale_price": 18000,
+    "original_price": 18000,
+    "isbn": "9781234567891",
+    "description": "중학교 영어 문법을 체계적으로 학습할 수 있는 교재입니다.",
+    "main_image_url": "https://example.com/image2.jpg"
+  }
+]

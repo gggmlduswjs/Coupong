@@ -1,0 +1,56 @@
+# 쿠팡 계정 설정
+# 주의: 비밀번호는 환경변수나 암호화된 값 사용 권장
+
+accounts:
+  account_01:
+    name: "엄마계정1"
+    email: "${ACCOUNT1_EMAIL}"  # 환경변수 또는 실제 이메일
+    password: "${ACCOUNT1_PASSWORD}"  # 환경변수 또는 실제 비밀번호
+    enabled: true
+    priority: 1
+    delay_between_products: 15  # 상품 간 딜레이(초)
+    delay_between_accounts: 60  # 계정 간 딜레이(초)
+    
+  account_02:
+    name: "엄마계정2"
+    email: "${ACCOUNT2_EMAIL}"
+    password: "${ACCOUNT2_PASSWORD}"
+    enabled: true
+    priority: 2
+    delay_between_products: 15
+    delay_between_accounts: 60
+    
+  account_03:
+    name: "엄마계정3"
+    email: "${ACCOUNT3_EMAIL}"
+    password: "${ACCOUNT3_PASSWORD}"
+    enabled: true
+    priority: 3
+    delay_between_products: 15
+    delay_between_accounts: 60
+    
+  account_04:
+    name: "엄마계정4"
+    email: "${ACCOUNT4_EMAIL}"
+    password: "${ACCOUNT4_PASSWORD}"
+    enabled: true
+    priority: 4
+    delay_between_products: 15
+    delay_between_accounts: 60
+    
+  account_05:
+    name: "엄마계정5"
+    email: "${ACCOUNT5_EMAIL}"
+    password: "${ACCOUNT5_PASSWORD}"
+    enabled: true
+    priority: 5
+    delay_between_products: 15
+    delay_between_accounts: 60
+
+# 전역 설정
+global_settings:
+  default_dry_run: true  # 기본값: 드라이런 모드
+  default_execution_mode: sequential  # sequential or parallel
+  max_parallel_workers: 2  # 병렬 실행 시 최대 워커 수
+  retry_on_failure: true
+  max_retries: 3
