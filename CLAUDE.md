@@ -2,7 +2,7 @@
 
 ## Obsidian 자동 기록 (필수)
 
-이 프로젝트는 `obsidian_vault/`에 개발 기록을 자동으로 남깁니다.
+이 프로젝트는 `Coupong_vault/`에 개발 기록을 자동으로 남깁니다.
 **개발 작업을 수행할 때마다 반드시 Obsidian vault를 업데이트하세요. 사용자가 요청하지 않아도 자동으로 해야 합니다.**
 
 ### 언제 기록하는가
@@ -18,7 +18,7 @@
 
 **1. 일일 로그 (매 작업 후 필수)**
 
-`obsidian_vault/01-Daily/YYYY-MM-DD.md` 파일에 append:
+`Coupong_vault/01-Daily/YYYY-MM-DD.md` 파일에 append:
 
 ```markdown
 ## HH:MM - 작업 제목
@@ -41,15 +41,64 @@
 
 **2. 기능 노트 (새 기능 구현 시)**
 
-`obsidian_vault/02-Features/기능명.md`에 기능 문서 작성
+`Coupong_vault/02-Features/기능명.md`에 기능 문서 작성
 
 **3. 기술 문서 (아키텍처 변경 시)**
 
-`obsidian_vault/03-Technical/문서명.md`에 기술 문서 작성
+`Coupong_vault/03-Technical/문서명.md`에 기술 문서 작성
 
 **4. 의사결정 로그 (중요 결정 시)**
 
-`obsidian_vault/04-Decisions/결정명.md`에 배경, 결정, 대안 기록
+`Coupong_vault/04-Decisions/결정명.md`에 배경, 결정, 대안 기록
+
+**5. 대화 기록 (중요 대화 종료 시 필수)**
+
+아래 조건에 해당하는 대화가 끝날 때, `Coupong_vault/06-Conversations/YYYY-MM-DD-주제.md`에 요약 기록:
+
+기록 대상:
+- 새 기능 설계/구현을 논의한 대화
+- 복잡한 버그를 해결한 대화
+- 아키텍처나 설계 결정을 내린 대화
+- 여러 파일을 수정하는 큰 작업을 진행한 대화
+
+기록하지 않는 대화:
+- 단순 질문/답변 (1-2턴)
+- 파일 내용 확인만 한 대화
+- 오타 수정 등 사소한 변경
+
+작성 형식:
+```markdown
+# Claude와의 대화 - [주제]
+
+#conversation #[태그]
+
+**날짜:** YYYY-MM-DD
+**주제:** 대화 주제 한 줄 요약
+
+---
+
+## 대화 개요
+2-3줄로 무엇을 논의/작업했는지 요약
+
+## 진행 과정
+1. [첫 번째 단계]
+2. [두 번째 단계]
+...
+
+## 주요 결정/결과
+- 결정 사항이나 작업 결과물 목록
+
+## 변경된 파일
+- `경로/파일.py` - 변경 내용
+
+## 관련 문서
+- [[관련-문서]]
+```
+
+주의:
+- 같은 날 같은 주제면 기존 파일에 append
+- 다른 주제면 새 파일 생성
+- `06-Conversations/README.md`의 대화 목록도 업데이트
 
 ### 주의사항
 

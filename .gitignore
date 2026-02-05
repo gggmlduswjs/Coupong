@@ -82,3 +82,19 @@ htmlcov/
 .mypy_cache/
 .dmypy.json
 dmypy.json
+
+# Obsidian 설정 (개인화 파일)
+Coupong_vault/.obsidian/
+
+# 임시 디버그 결과 파일
+scripts/_*_result.txt
+scripts/_check_result.txt
+
+# 스크린샷
+screenshots/
+
+# 참고 문서 (PDF)
+*.pdf
+
+# 테스트 스크립트
+test_connection.ps1

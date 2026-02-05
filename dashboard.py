@@ -1095,15 +1095,16 @@ elif page == "정산":
     _months_in = ",".join(f"'{m}'" for m in settle_months)
     _s_month_where = f"AND s.year_month IN ({_months_in})"
 
-    # ── KPI ──
+    # ── KPI (WEEKLY만 집계 — RESERVE는 같은 매출의 월 단위 재정리이므로 제외) ──
     _s_kpi = query_df(f"""
         SELECT
             COALESCE(SUM(s.total_sale), 0) as total_sale,
-            COALESCE(SUM(s.settlement_target_amount), 0) as target_amount,
             COALESCE(SUM(s.final_amount), 0) as final_amount,
-            COALESCE(SUM(s.service_fee), 0) as service_fee
+            COALESCE(SUM(s.service_fee), 0) as service_fee,
+            COALESCE(SUM(s.seller_service_fee), 0) as seller_service_fee,
+            COALESCE(SUM(s.last_amount), 0) as last_amount
         FROM settlement_history s
-        WHERE 1=1 {_s_acct_where} {_s_month_where}
+        WHERE s.settlement_type = 'WEEKLY' {_s_acct_where} {_s_month_where}
     """)
 
     if _s_kpi.empty or int(_s_kpi.iloc[0]["total_sale"]) == 0:
@@ -1112,31 +1113,35 @@ elif page == "정산":
 
     _sk = _s_kpi.iloc[0]
     _s_total_sale = int(_sk["total_sale"])
-    _s_target = int(_sk["target_amount"])
     _s_final = int(_sk["final_amount"])
-    _s_fee = int(_sk["service_fee"])
-    _s_fee_rate = round(abs(_s_fee) / _s_total_sale * 100, 1) if _s_total_sale > 0 else 0
+    _s_fee = abs(int(_sk["service_fee"]))
+    _s_seller_fee = abs(int(_sk["seller_service_fee"]))
+    _s_total_deduct = _s_total_sale - _s_final
+    _s_receive_rate = round(_s_final / _s_total_sale * 100, 1) if _s_total_sale > 0 else 0
 
     sk1, sk2, sk3, sk4 = st.columns(4)
     sk1.metric("총판매액", _fmt_krw_s(_s_total_sale))
-    sk2.metric("정산대상액", _fmt_krw_s(_s_target))
-    sk3.metric("최종지급액", _fmt_krw_s(_s_final))
-    sk4.metric("수수료율", f"{_s_fee_rate}%")
+    sk2.metric("실지급액", _fmt_krw_s(_s_final))
+    sk3.metric("총차감액", _fmt_krw_s(_s_total_deduct))
+    sk4.metric("수취율", f"{_s_receive_rate}%")
 
-    st.caption(f"선택 기간: {settle_months[-1]} ~ {settle_months[0]}  |  수수료 합계: {_fmt_krw_s(abs(_s_fee))}")
+    _fee_detail = f"판매수수료 {_fmt_krw_s(_s_fee)}"
+    if _s_seller_fee > 0:
+        _fee_detail += f" + 광고비 등 {_fmt_krw_s(_s_seller_fee)}"
+    st.caption(f"선택 기간: {settle_months[-1]} ~ {settle_months[0]}  |  {_fee_detail}")
 
-    # ── 월별 추이 차트 ──
+    # ── 월별 추이 차트 (WEEKLY만) ──
     _s_monthly = query_df(f"""
         SELECT s.year_month as 월,
             SUM(s.total_sale) as 총판매액,
-            SUM(s.settlement_target_amount) as 정산대상액,
-            SUM(s.final_amount) as 최종지급액
+            SUM(s.final_amount) as 실지급액,
+            SUM(s.total_sale) - SUM(s.final_amount) as 차감액
         FROM settlement_history s
-        WHERE 1=1 {_s_acct_where} {_s_month_where}
+        WHERE s.settlement_type = 'WEEKLY' {_s_acct_where} {_s_month_where}
         GROUP BY s.year_month ORDER BY s.year_month
     """)
     if not _s_monthly.empty:
-        st.bar_chart(_s_monthly.set_index("월")[["총판매액", "정산대상액", "최종지급액"]])
+        st.bar_chart(_s_monthly.set_index("월")[["총판매액", "실지급액"]])
 
     st.divider()
 
@@ -1153,7 +1158,7 @@ elif page == "정산":
                 ROUND(ABS(SUM(s.service_fee)) * 100.0 / NULLIF(SUM(s.total_sale), 0), 1) as '수수료율(%)'
             FROM settlement_history s
             JOIN accounts a ON s.account_id = a.id
-            WHERE 1=1 {_s_month_where}
+            WHERE s.settlement_type = 'WEEKLY' {_s_month_where}
             GROUP BY s.account_id ORDER BY 총판매액 DESC
         """)
         if not _s_acct_cmp.empty:
