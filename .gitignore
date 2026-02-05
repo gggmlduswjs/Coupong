@@ -57,6 +57,14 @@ data/reports/*
 # OS
 .DS_Store
 Thumbs.db
+nul
+
+# Backup & temp
+*.bak
+~$*
+
+# Claude Code
+.claude/projects/
 
 # Playwright
 playwright-state/
