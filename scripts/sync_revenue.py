@@ -1,0 +1,351 @@
+"""
+매출 내역 동기화 스크립트
+========================
+WING Revenue History API → revenue_history 테이블
+
+사용법:
+    python scripts/sync_revenue.py              # 기본 3개월
+    python scripts/sync_revenue.py --months 1   # 최근 1개월
+    python scripts/sync_revenue.py --account 007-book  # 특정 계정만
+"""
+import os
+import sys
+import argparse
+import logging
+from datetime import datetime, date, timedelta
+from pathlib import Path
+from typing import List, Tuple, Optional, Callable
+
+from sqlalchemy import create_engine, text, inspect
+
+# 프로젝트 루트
+ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(ROOT))
+
+from dotenv import load_dotenv
+load_dotenv(ROOT / ".env")
+
+from app.api.coupang_wing_client import CoupangWingClient, CoupangWingError
+from app.constants import WING_ACCOUNT_ENV_MAP
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger(__name__)
+
+
+class RevenueSync:
+    """매출 내역 동기화 엔진"""
+
+    # revenue_history 테이블 DDL
+    CREATE_TABLE_SQL = """
+    CREATE TABLE IF NOT EXISTS revenue_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        account_id INTEGER NOT NULL REFERENCES accounts(id),
+        order_id BIGINT NOT NULL,
+        sale_type VARCHAR(10) NOT NULL,
+        sale_date DATE NOT NULL,
+        recognition_date DATE NOT NULL,
+        settlement_date DATE,
+        product_id BIGINT,
+        product_name VARCHAR(500),
+        vendor_item_id BIGINT,
+        vendor_item_name VARCHAR(500),
+        sale_price INTEGER DEFAULT 0,
+        quantity INTEGER DEFAULT 0,
+        coupang_discount INTEGER DEFAULT 0,
+        sale_amount INTEGER DEFAULT 0,
+        seller_discount INTEGER DEFAULT 0,
+        service_fee INTEGER DEFAULT 0,
+        service_fee_vat INTEGER DEFAULT 0,
+        service_fee_ratio REAL,
+        settlement_amount INTEGER DEFAULT 0,
+        delivery_fee_amount INTEGER DEFAULT 0,
+        delivery_fee_settlement INTEGER DEFAULT 0,
+        listing_id INTEGER REFERENCES listings(id),
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(account_id, order_id, vendor_item_id)
+    )
+    """
+
+    CREATE_INDEXES_SQL = [
+        "CREATE INDEX IF NOT EXISTS ix_rev_account_date ON revenue_history(account_id, recognition_date)",
+        "CREATE INDEX IF NOT EXISTS ix_rev_recognition ON revenue_history(recognition_date)",
+        "CREATE INDEX IF NOT EXISTS ix_rev_listing ON revenue_history(listing_id)",
+    ]
+
+    def __init__(self, db_path: str = None):
+        if db_path is None:
+            db_path = str(ROOT / "coupang_auto.db")
+        self.engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+        self._ensure_table()
+
+    def _ensure_table(self):
+        """테이블이 없으면 생성"""
+        with self.engine.connect() as conn:
+            conn.execute(text(self.CREATE_TABLE_SQL))
+            for idx_sql in self.CREATE_INDEXES_SQL:
+                conn.execute(text(idx_sql))
+            conn.commit()
+        logger.info("revenue_history 테이블 확인 완료")
+
+    def _get_accounts(self, account_name: str = None) -> list:
+        """WING API 활성화된 계정 목록 조회"""
+        sql = """
+            SELECT id, account_name, vendor_id, wing_access_key, wing_secret_key
+            FROM accounts
+            WHERE is_active = 1 AND wing_api_enabled = 1
+                  AND vendor_id IS NOT NULL
+                  AND wing_access_key IS NOT NULL
+                  AND wing_secret_key IS NOT NULL
+        """
+        if account_name:
+            sql += f" AND account_name = '{account_name}'"
+        sql += " ORDER BY account_name"
+
+        with self.engine.connect() as conn:
+            rows = conn.execute(text(sql)).mappings().all()
+        return [dict(r) for r in rows]
+
+    def _create_client(self, account: dict) -> CoupangWingClient:
+        """계정 정보로 WING 클라이언트 생성"""
+        name = account["account_name"]
+        env_prefix = WING_ACCOUNT_ENV_MAP.get(name, "")
+
+        vendor_id = account.get("vendor_id") or ""
+        access_key = account.get("wing_access_key") or ""
+        secret_key = account.get("wing_secret_key") or ""
+
+        # DB 값이 없으면 환경변수에서 가져오기
+        if not access_key and env_prefix:
+            vendor_id = os.getenv(f"{env_prefix}_VENDOR_ID", vendor_id)
+            access_key = os.getenv(f"{env_prefix}_ACCESS_KEY", "")
+            secret_key = os.getenv(f"{env_prefix}_SECRET_KEY", "")
+
+        return CoupangWingClient(vendor_id, access_key, secret_key)
+
+    @staticmethod
+    def _split_date_range(date_from: date, date_to: date, window_days: int = 29) -> List[Tuple[str, str]]:
+        """날짜 범위를 window_days 단위 윈도우로 분할"""
+        windows = []
+        current = date_from
+        while current <= date_to:
+            end = min(current + timedelta(days=window_days - 1), date_to)
+            windows.append((current.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")))
+            current = end + timedelta(days=1)
+        return windows
+
+    def _match_listing(self, conn, account_id: int, product_id, vendor_item_id, product_name: str = None) -> Optional[int]:
+        """product_id, vendor_item_id, product_name으로 listings 매칭"""
+        # 1차: coupang_product_id 매칭
+        if product_id:
+            row = conn.execute(text(
+                "SELECT id FROM listings WHERE account_id = :aid AND coupang_product_id = :pid LIMIT 1"
+            ), {"aid": account_id, "pid": str(product_id)}).fetchone()
+            if row:
+                return row[0]
+        # 2차: product_name 정확 매칭
+        if product_name:
+            row = conn.execute(text(
+                "SELECT id FROM listings WHERE account_id = :aid AND product_name = :name LIMIT 1"
+            ), {"aid": account_id, "name": product_name}).fetchone()
+            if row:
+                return row[0]
+        return None
+
+    def _parse_date(self, date_str) -> Optional[str]:
+        """날짜 문자열 파싱 (다양한 형식 지원)"""
+        if not date_str:
+            return None
+        if isinstance(date_str, date):
+            return date_str.isoformat()
+        # "2026-01-15" 또는 "2026-01-15T00:00:00" 형식
+        return str(date_str)[:10]
+
+    def sync_account(self, account: dict, date_from: date, date_to: date,
+                     progress_callback: Callable = None) -> dict:
+        """
+        계정 1개의 매출 동기화
+
+        Returns:
+            {"account": str, "fetched": int, "inserted": int, "matched": int}
+        """
+        account_id = account["id"]
+        account_name = account["account_name"]
+        client = self._create_client(account)
+
+        logger.info(f"[{account_name}] 매출 동기화 시작: {date_from} ~ {date_to}")
+
+        windows = self._split_date_range(date_from, date_to)
+        total_fetched = 0
+        total_inserted = 0
+        total_matched = 0
+
+        for wi, (w_from, w_to) in enumerate(windows):
+            logger.info(f"  [{account_name}] 윈도우 {wi+1}/{len(windows)}: {w_from} ~ {w_to}")
+
+            try:
+                orders = client.get_all_revenue_history(w_from, w_to)
+            except CoupangWingError as e:
+                logger.error(f"  [{account_name}] API 오류: {e}")
+                continue
+
+            if not orders:
+                logger.info(f"  [{account_name}] 데이터 없음")
+                continue
+
+            with self.engine.connect() as conn:
+                for order in orders:
+                    # Revenue API 응답 구조: 주문 단위 또는 아이템 단위
+                    items = order.get("items", [order])  # items가 없으면 order 자체가 아이템
+
+                    for item in items:
+                        total_fetched += 1
+                        order_id = item.get("orderId") or order.get("orderId")
+                        v_item_id = item.get("vendorItemId")
+                        p_id = item.get("productId") or order.get("productId")
+
+                        if not order_id or not v_item_id:
+                            continue
+
+                        # listing 매칭
+                        p_name = item.get("productName") or item.get("vendorItemName", "")
+                        listing_id = self._match_listing(conn, account_id, p_id, v_item_id, p_name)
+                        if listing_id:
+                            total_matched += 1
+
+                        sale_date = self._parse_date(item.get("saleDate") or order.get("saleDate"))
+                        recog_date = self._parse_date(item.get("recognitionDate") or order.get("recognitionDate"))
+                        settle_date = self._parse_date(item.get("settlementDate") or order.get("settlementDate"))
+
+                        if not sale_date or not recog_date:
+                            continue
+
+                        try:
+                            conn.execute(text("""
+                                INSERT OR IGNORE INTO revenue_history
+                                (account_id, order_id, sale_type, sale_date, recognition_date,
+                                 settlement_date, product_id, product_name, vendor_item_id,
+                                 vendor_item_name, sale_price, quantity, coupang_discount,
+                                 sale_amount, seller_discount, service_fee, service_fee_vat,
+                                 service_fee_ratio, settlement_amount, delivery_fee_amount,
+                                 delivery_fee_settlement, listing_id)
+                                VALUES
+                                (:account_id, :order_id, :sale_type, :sale_date, :recognition_date,
+                                 :settlement_date, :product_id, :product_name, :vendor_item_id,
+                                 :vendor_item_name, :sale_price, :quantity, :coupang_discount,
+                                 :sale_amount, :seller_discount, :service_fee, :service_fee_vat,
+                                 :service_fee_ratio, :settlement_amount, :delivery_fee_amount,
+                                 :delivery_fee_settlement, :listing_id)
+                            """), {
+                                "account_id": account_id,
+                                "order_id": int(order_id),
+                                "sale_type": item.get("saleType", "SALE"),
+                                "sale_date": sale_date,
+                                "recognition_date": recog_date,
+                                "settlement_date": settle_date,
+                                "product_id": int(p_id) if p_id else None,
+                                "product_name": item.get("productName") or item.get("vendorItemName", ""),
+                                "vendor_item_id": int(v_item_id),
+                                "vendor_item_name": item.get("vendorItemName", ""),
+                                "sale_price": int(item.get("salePrice", 0) or 0),
+                                "quantity": int(item.get("quantity", 0) or 0),
+                                "coupang_discount": int(item.get("coupangDiscount", 0) or 0),
+                                "sale_amount": int(item.get("saleAmount", 0) or 0),
+                                "seller_discount": int(item.get("sellerDiscount", 0) or 0),
+                                "service_fee": int(item.get("serviceFee", 0) or 0),
+                                "service_fee_vat": int(item.get("serviceFeeVat", 0) or 0),
+                                "service_fee_ratio": float(item.get("serviceFeeRatio", 0) or 0),
+                                "settlement_amount": int(item.get("settlementAmount", 0) or 0),
+                                "delivery_fee_amount": int(item.get("deliveryFeeAmount", 0) or 0),
+                                "delivery_fee_settlement": int(item.get("deliveryFeeSettlement", 0) or 0),
+                                "listing_id": listing_id,
+                            })
+                            total_inserted += 1
+                        except Exception as e:
+                            logger.debug(f"  INSERT 스킵 (중복 또는 오류): {e}")
+
+                conn.commit()
+
+            if progress_callback:
+                progress_callback(wi + 1, len(windows),
+                                  f"[{account_name}] {wi+1}/{len(windows)} 윈도우 완료 ({total_fetched}건)")
+
+        result = {
+            "account": account_name,
+            "fetched": total_fetched,
+            "inserted": total_inserted,
+            "matched": total_matched,
+        }
+        logger.info(f"[{account_name}] 완료: 조회 {total_fetched}건, 저장 {total_inserted}건, 매칭 {total_matched}건")
+        return result
+
+    def sync_all(self, months: int = 3, account_name: str = None,
+                 progress_callback: Callable = None) -> List[dict]:
+        """
+        전체 계정 매출 동기화
+
+        Args:
+            months: 동기화 기간 (개월)
+            account_name: 특정 계정만 (None=전체)
+            progress_callback: 진행 콜백 (current, total, message)
+
+        Returns:
+            계정별 결과 리스트
+        """
+        accounts = self._get_accounts(account_name)
+        if not accounts:
+            logger.warning("WING API 활성화된 계정이 없습니다.")
+            return []
+
+        date_to = date.today() - timedelta(days=1)  # API는 어제까지만 조회 가능
+        date_from = date_to - timedelta(days=months * 30)
+
+        logger.info(f"매출 동기화: {len(accounts)}개 계정, {date_from} ~ {date_to}")
+
+        results = []
+        for i, account in enumerate(accounts):
+            if progress_callback:
+                progress_callback(i, len(accounts),
+                                  f"{account['account_name']} 동기화 중...")
+
+            result = self.sync_account(account, date_from, date_to, progress_callback)
+            results.append(result)
+
+        if progress_callback:
+            progress_callback(len(accounts), len(accounts), "동기화 완료!")
+
+        # 결과 요약
+        total_f = sum(r["fetched"] for r in results)
+        total_i = sum(r["inserted"] for r in results)
+        total_m = sum(r["matched"] for r in results)
+        logger.info(f"전체 완료: {len(accounts)}개 계정, 조회 {total_f}건, 저장 {total_i}건, 매칭 {total_m}건")
+
+        return results
+
+
+def main():
+    parser = argparse.ArgumentParser(description="매출 내역 동기화")
+    parser.add_argument("--months", type=int, default=3, help="동기화 기간 (개월, 기본 3)")
+    parser.add_argument("--account", type=str, default=None, help="특정 계정명 (기본: 전체)")
+    args = parser.parse_args()
+
+    syncer = RevenueSync()
+    results = syncer.sync_all(months=args.months, account_name=args.account)
+
+    # 리포트
+    print("\n" + "=" * 60)
+    print("매출 동기화 결과")
+    print("=" * 60)
+    for r in results:
+        print(f"  {r['account']:12s} | 조회 {r['fetched']:5d} | 저장 {r['inserted']:5d} | 매칭 {r['matched']:5d}")
+    print("=" * 60)
+
+    # DB 확인
+    from sqlalchemy import create_engine as ce
+    eng = ce(f"sqlite:///{ROOT / 'coupang_auto.db'}")
+    with eng.connect() as conn:
+        cnt = conn.execute(text("SELECT COUNT(*) FROM revenue_history")).scalar()
+        print(f"\nrevenue_history 총 레코드: {cnt:,}건")
+
+
+if __name__ == "__main__":
+    main()
