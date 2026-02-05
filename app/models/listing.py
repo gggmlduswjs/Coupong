@@ -32,6 +32,10 @@ class Listing(Base):
     coupang_product_id = Column(String(50))  # 쿠팡 상품 ID
     coupang_status = Column(String(20), default='pending', index=True)  # pending, active, sold_out
 
+    # 상품 정보
+    product_name = Column(String(500))  # 상품명 (쿠팡 표시명)
+    original_price = Column(Integer, default=0)  # 정가
+
     # 판매 정보
     sale_price = Column(Integer, nullable=False)
     shipping_policy = Column(String(20), nullable=False)  # 'free', 'paid'

@@ -64,6 +64,23 @@ class Settings(BaseSettings):
     coupang_id_5: Optional[str] = None
     coupang_pw_5: Optional[str] = None
 
+    # Coupang WING API
+    coupang_007book_vendor_id: Optional[str] = None
+    coupang_007book_access_key: Optional[str] = None
+    coupang_007book_secret_key: Optional[str] = None
+    coupang_007bm_vendor_id: Optional[str] = None
+    coupang_007bm_access_key: Optional[str] = None
+    coupang_007bm_secret_key: Optional[str] = None
+    coupang_007ez_vendor_id: Optional[str] = None
+    coupang_007ez_access_key: Optional[str] = None
+    coupang_007ez_secret_key: Optional[str] = None
+    coupang_002bm_vendor_id: Optional[str] = None
+    coupang_002bm_access_key: Optional[str] = None
+    coupang_002bm_secret_key: Optional[str] = None
+    coupang_big6ceo_vendor_id: Optional[str] = None
+    coupang_big6ceo_access_key: Optional[str] = None
+    coupang_big6ceo_secret_key: Optional[str] = None
+
     class Config:
         env_file = ".env"
         case_sensitive = False

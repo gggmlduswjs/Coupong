@@ -8,6 +8,8 @@ from app.models.listing import Listing
 from app.models.sales import Sales
 from app.models.analysis_result import AnalysisResult
 from app.models.task import Task
+from app.models.revenue_history import RevenueHistory
+from app.models.settlement_history import SettlementHistory
 
 __all__ = [
     "Account",
@@ -19,4 +21,6 @@ __all__ = [
     "Sales",
     "AnalysisResult",
     "Task",
+    "RevenueHistory",
+    "SettlementHistory",
 ]
