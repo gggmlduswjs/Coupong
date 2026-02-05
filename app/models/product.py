@@ -3,6 +3,7 @@ from sqlalchemy import Column, Integer, String, Boolean, Text, Float, DateTime, 
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from app.database import Base
+from app.constants import DEFAULT_SHIPPING_COST, FREE_SHIPPING_THRESHOLD, DEFAULT_STOCK
 
 
 class Product(Base):
@@ -22,7 +23,7 @@ class Product(Base):
     # 마진 분석
     supply_rate = Column(Float, nullable=False)  # 공급률 (0.27~0.60)
     margin_per_unit = Column(Integer, nullable=False)  # 권당 마진 (원)
-    shipping_cost = Column(Integer, default=2000)  # 배송비 (원)
+    shipping_cost = Column(Integer, default=DEFAULT_SHIPPING_COST)  # 배송비 (원)
     net_margin = Column(Integer, nullable=False)  # 순마진 (마진 - 배송비)
 
     # 배송 정책
@@ -91,7 +92,7 @@ class Product(Base):
     @property
     def is_free_shipping_eligible(self):
         """무료배송 가능 상품인지"""
-        return self.net_margin >= 2000
+        return self.net_margin >= FREE_SHIPPING_THRESHOLD
 
     def is_uploaded_to_account(self, account_id, db_session):
         """특정 계정에 이미 업로드되었는지 체크"""
@@ -128,6 +129,6 @@ class Product(Base):
             'sale_price': self.sale_price,
             'list_price': self.list_price,
             'shipping_policy': '무료배송' if self.shipping_policy == 'free' else '유료배송',
-            'stock_quantity': 10,
+            'stock_quantity': DEFAULT_STOCK,
             'net_margin': self.net_margin
         }

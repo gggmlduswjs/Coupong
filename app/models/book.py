@@ -3,6 +3,7 @@ from sqlalchemy import Column, Integer, String, Text, Date, Boolean, DateTime, F
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from app.database import Base
+from app.constants import BOOK_DISCOUNT_RATE
 import re
 
 
@@ -142,7 +143,7 @@ class Book(Base):
     @property
     def sale_price(self):
         """판매가 (도서정가제)"""
-        return int(self.list_price * 0.9)
+        return int(self.list_price * BOOK_DISCOUNT_RATE)
 
     def calculate_margin(self, publisher=None):
         """마진 계산 (출판사 정보 필요)"""

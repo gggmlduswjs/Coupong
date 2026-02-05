@@ -3,6 +3,7 @@ from sqlalchemy import Column, Integer, String, Text, Float, DateTime, ForeignKe
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from app.database import Base
+from app.constants import BOOK_DISCOUNT_RATE, DEFAULT_SHIPPING_COST, FREE_SHIPPING_THRESHOLD
 import json
 
 
@@ -33,7 +34,7 @@ class BundleSKU(Base):
     # 마진 분석
     supply_rate = Column(Float, nullable=False)
     total_margin = Column(Integer, nullable=False)  # 총 마진
-    shipping_cost = Column(Integer, default=2000)
+    shipping_cost = Column(Integer, default=DEFAULT_SHIPPING_COST)
     net_margin = Column(Integer, nullable=False)  # 순마진
 
     # 배송 정책
@@ -79,7 +80,7 @@ class BundleSKU(Base):
         bundle_name = f"{normalized_series} {len(books)}종 세트 ({year})"
 
         # 가격 계산 (도서정가제)
-        total_sale_price = int(total_list_price * 0.9)
+        total_sale_price = int(total_list_price * BOOK_DISCOUNT_RATE)
 
         # 마진 계산
         margin_info = publisher.calculate_margin(total_list_price)
@@ -99,7 +100,7 @@ class BundleSKU(Base):
             total_margin=margin_info['margin_per_unit'],
             shipping_cost=margin_info['shipping_cost'],
             net_margin=margin_info['net_margin'],
-            shipping_policy='free' if margin_info['net_margin'] >= 2000 else 'paid',
+            shipping_policy='free' if margin_info['net_margin'] >= FREE_SHIPPING_THRESHOLD else 'paid',
             status='ready'
         )
 
@@ -121,7 +122,7 @@ class BundleSKU(Base):
     @property
     def is_free_shipping_eligible(self):
         """무료배송 가능 묶음인지"""
-        return self.net_margin >= 2000
+        return self.net_margin >= FREE_SHIPPING_THRESHOLD
 
     def is_uploaded_to_account(self, account_id, db_session):
         """특정 계정에 이미 업로드되었는지 체크"""

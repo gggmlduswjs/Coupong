@@ -3,6 +3,7 @@ from sqlalchemy import Column, Integer, String, Boolean, Text, Float, DateTime
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from app.database import Base
+from app.constants import BOOK_DISCOUNT_RATE, COUPANG_FEE_RATE, DEFAULT_SHIPPING_COST, FREE_SHIPPING_THRESHOLD
 
 
 class Publisher(Base):
@@ -30,13 +31,13 @@ class Publisher(Base):
         """매입률 → 마진율 변환"""
         return 100 - self.margin_rate
 
-    def calculate_margin(self, list_price: int, shipping_cost: int = 2000) -> dict:
+    def calculate_margin(self, list_price: int, shipping_cost: int = DEFAULT_SHIPPING_COST) -> dict:
         """
         마진 계산
 
         Args:
             list_price: 정가
-            shipping_cost: 배송비 (기본 2000원)
+            shipping_cost: 배송비 (기본 DEFAULT_SHIPPING_COST원)
 
         Returns:
             {
@@ -47,9 +48,9 @@ class Publisher(Base):
                 'net_margin': 순마진 (배송비 제외)
             }
         """
-        sale_price = int(list_price * 0.9)  # 도서정가제: 정가의 90%
-        supply_cost = int(list_price * self.supply_rate)  # 공급가
-        coupang_fee = int(sale_price * 0.11)  # 쿠팡 수수료 11%
+        sale_price = int(list_price * BOOK_DISCOUNT_RATE)
+        supply_cost = int(list_price * self.supply_rate)
+        coupang_fee = int(sale_price * COUPANG_FEE_RATE)
         margin_per_unit = sale_price - supply_cost - coupang_fee
         net_margin = margin_per_unit - shipping_cost
 
@@ -74,7 +75,7 @@ class Publisher(Base):
         margin_info = self.calculate_margin(list_price)
         net_margin = margin_info['net_margin']
 
-        if net_margin >= 2000:
+        if net_margin >= FREE_SHIPPING_THRESHOLD:
             return 'free'
         elif net_margin >= 0:
             return 'paid'
