@@ -9,9 +9,6 @@ from app.models.sales import Sales
 from app.models.analysis_result import AnalysisResult
 from app.models.task import Task
 
-# 하위 호환성을 위한 별칭
-KyoboProduct = Book  # kyobo_products → books 이름 변경
-
 __all__ = [
     "Account",
     "Publisher",
@@ -22,5 +19,4 @@ __all__ = [
     "Sales",
     "AnalysisResult",
     "Task",
-    "KyoboProduct",  # 하위 호환용
 ]
