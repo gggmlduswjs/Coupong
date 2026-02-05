@@ -1,9 +1,0 @@
-{
-  "theme": "obsidian",
-  "enabledPlugins": [
-    "daily-notes",
-    "graph",
-    "backlink",
-    "tag-pane"
-  ]
-}
