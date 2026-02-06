@@ -76,7 +76,7 @@ class SettlementSync:
     def __init__(self, db_path: str = None):
         if db_path is None:
             db_path = str(ROOT / "coupang_auto.db")
-        self.engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+        self.engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False, "timeout": 30})
         self._ensure_table()
 
     def _ensure_table(self):

@@ -39,15 +39,16 @@ logger = logging.getLogger(__name__)
 DB_TIMEOUT = 30
 
 
-def _safe_commit(db, retries=3):
-    """SQLite lock 대비 재시도 커밋"""
+def _safe_commit(db, retries=5):
+    """SQLite lock 대비 rollback + 재시도 커밋"""
     for attempt in range(retries):
         try:
             db.commit()
             return
         except Exception:
+            db.rollback()
             if attempt < retries - 1:
-                time.sleep(2)
+                time.sleep(3)
             else:
                 raise
 

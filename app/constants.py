@@ -7,8 +7,10 @@ BOOK_DISCOUNT_RATE = 0.9  # 정가 × 0.9 = 판매가
 COUPANG_FEE_RATE = 0.11  # 판매가의 11%
 
 # 배송비
-DEFAULT_SHIPPING_COST = 2000  # 기본 배송비 (원)
-FREE_SHIPPING_THRESHOLD = 2000  # 무료배송 순마진 기준 (원)
+DEFAULT_SHIPPING_COST = 2300  # 실제 택배비 (원)
+FREE_SHIPPING_THRESHOLD = 2000  # 무료배송 순마진 기준 (원) - 마진 2000원 이상이면 무료배송 가능
+TARGET_MARGIN_MIN = 1300  # 목표 최소 마진 (원)
+TARGET_MARGIN_MAX = 2000  # 목표 최대 마진 (원)
 
 # 재고
 DEFAULT_STOCK = 10  # 기본 재고 수량
@@ -20,11 +22,13 @@ API_THROTTLE_SECONDS = 1.0  # 알라딘 API 호출 간격 (초)
 COUPANG_WING_RATE_LIMIT = 0.1  # WING API 호출 간격 (초, 10 calls/sec)
 
 # 쿠팡 WING API - 도서 상품 등록 기본값 (PDF 가이드 기반)
+# 마진 계산: 순마진 = 정가×0.151 + (고객배송비 - 실제배송비)
+# 유료배송(2,500원)이면 +200원, 무료배송이면 -2,300원
 BOOK_PRODUCT_DEFAULTS = {
     "deliveryMethod": "SEQUENCIAL",              # 일반배송
-    "deliveryChargeType": "NOT_FREE",            # 유료배송 기본 (2026-02-06 변경)
-    "deliveryCharge": 2500,                       # 배송비 2,500원
-    "freeShipOverAmount": 0,
+    "deliveryChargeType": "NOT_FREE",            # 유료배송 기본
+    "deliveryCharge": 2500,                       # 고객 부담 배송비 (실제 2,300원 + 200원 마진)
+    "freeShipOverAmount": 0,                      # 조건부 무료배송 금액 (0=사용안함)
     "deliveryChargeOnReturn": 2500,
     "unionDeliveryType": "UNION_DELIVERY",
     "remoteAreaDeliverable": "N",
@@ -97,7 +101,8 @@ AUTO_CRAWL_CONFIG = {
 # 가격/마진 설정
 # ─────────────────────────────────────────────
 PRICE_CONFIG = {
-    "min_margin": 1000,         # 최소 마진 (원)
+    "min_margin": 1300,         # 최소 마진 (원) - 이 이하면 판매 비권장
+    "target_margin": 2000,      # 목표 마진 (원)
     "min_margin_rate": 0.05,    # 최소 마진율 (5%)
     "bundle_threshold": 2000,   # 묶음 판매 기준 마진 (원)
 }

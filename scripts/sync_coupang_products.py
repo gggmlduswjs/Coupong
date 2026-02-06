@@ -85,24 +85,38 @@ def _extract_isbn(product_data: dict) -> str:
     쿠팡 상품 데이터에서 ISBN 추출
 
     우선순위:
-    1. items[].barcode (바코드에 ISBN 13자리)
-    2. items[].searchTags에서 ISBN 패턴
-    3. sellerProductName에서 ISBN 패턴
+    1. items[].attributes에서 ISBN 필드 (가장 정확)
+    2. items[].barcode (바코드에 ISBN 13자리)
+    3. items[].searchTags에서 ISBN 패턴
+    4. sellerProductName에서 ISBN 패턴
 
     Returns:
         ISBN 문자열 또는 빈 문자열
     """
     isbn_pattern = re.compile(r'97[89]\d{10}')
-
-    # 1) items의 barcode에서 검색
     items = product_data.get("items", [])
+
+    # 1) items[].attributes에서 ISBN 추출 (가장 정확)
+    for item in items:
+        attributes = item.get("attributes", [])
+        if isinstance(attributes, list):
+            for attr in attributes:
+                attr_name = attr.get("attributeTypeName", "")
+                attr_value = attr.get("attributeValueName", "")
+                if attr_name == "ISBN" and attr_value and "상세" not in attr_value:
+                    # ISBN 값이 숫자로만 구성되어 있는지 확인
+                    cleaned = re.sub(r'[^0-9]', '', attr_value)
+                    if len(cleaned) == 13 and cleaned.startswith(("978", "979")):
+                        return cleaned
+
+    # 2) items의 barcode에서 검색
     for item in items:
         barcode = str(item.get("barcode", ""))
         match = isbn_pattern.search(barcode)
         if match:
             return match.group()
 
-    # 2) items의 vendorItemName 또는 searchTags에서 검색
+    # 3) items의 vendorItemName 또는 searchTags에서 검색
     for item in items:
         # searchTags
         search_tags = item.get("searchTags", [])
@@ -118,7 +132,7 @@ def _extract_isbn(product_data: dict) -> str:
         if match:
             return match.group()
 
-    # 3) sellerProductName에서 검색
+    # 4) sellerProductName에서 검색
     product_name = str(product_data.get("sellerProductName", ""))
     match = isbn_pattern.search(product_name)
     if match:
@@ -158,7 +172,7 @@ def _parse_detail_fields(detail_data: dict) -> dict:
     """상세 API 응답에서 DB 필드를 파싱"""
     result = {}
 
-    # brand
+    # brand (루트 레벨)
     result["brand"] = detail_data.get("brand", "") or ""
 
     # displayCategoryCode
@@ -175,11 +189,33 @@ def _parse_detail_fields(detail_data: dict) -> dict:
     # items[0]에서 추출
     items = detail_data.get("items", [])
     if items:
-        result["maximum_buy_count"] = items[0].get("maximumBuyCount", None)
-        result["supply_price"] = items[0].get("supplyPrice", None)
+        item = items[0]
+        result["maximum_buy_count"] = item.get("maximumBuyCount", None)
+        result["supply_price"] = item.get("supplyPrice", None)
+        result["original_price"] = item.get("originalPrice", None)
+        result["sale_price"] = item.get("salePrice", None)
+
+        # attributes에서 ISBN, 출판사 추출
+        result["isbn"] = None
+        result["publisher"] = None
+        attributes = item.get("attributes", [])
+        if isinstance(attributes, list):
+            for attr in attributes:
+                attr_name = attr.get("attributeTypeName", "")
+                attr_value = attr.get("attributeValueName", "")
+                if attr_name == "ISBN" and attr_value and "상세" not in attr_value:
+                    cleaned = re.sub(r'[^0-9]', '', attr_value)
+                    if len(cleaned) == 13:
+                        result["isbn"] = cleaned
+                elif attr_name == "출판사" and attr_value and "상세" not in attr_value:
+                    result["publisher"] = attr_value
     else:
         result["maximum_buy_count"] = None
         result["supply_price"] = None
+        result["original_price"] = None
+        result["sale_price"] = None
+        result["isbn"] = None
+        result["publisher"] = None
 
     return result
 
@@ -418,10 +454,45 @@ def sync_account_products(
             lst.display_category_code = parsed["display_category_code"]
             lst.delivery_charge_type = parsed["delivery_charge_type"]
             lst.maximum_buy_count = parsed["maximum_buy_count"]
+            if parsed["maximum_buy_count"] and parsed["maximum_buy_count"] > 0:
+                lst.stock_quantity = parsed["maximum_buy_count"]
             lst.supply_price = parsed["supply_price"]
             lst.delivery_charge = parsed["delivery_charge"]
             lst.free_ship_over_amount = parsed["free_ship_over_amount"]
             lst.return_charge = parsed["return_charge"]
+
+            # ISBN (attributes에서 추출한 것이 더 정확)
+            # 단, 같은 account_id + isbn 조합이 이미 있으면 스킵 (UNIQUE 제약)
+            if parsed["isbn"] and not lst.isbn:
+                existing_with_isbn = db.query(Listing).filter(
+                    Listing.account_id == lst.account_id,
+                    Listing.isbn == parsed["isbn"],
+                    Listing.id != lst.id
+                ).first()
+                if not existing_with_isbn:
+                    lst.isbn = parsed["isbn"]
+
+            # 가격 업데이트
+            if parsed["original_price"] and parsed["original_price"] > 0:
+                lst.original_price = parsed["original_price"]
+            if parsed["sale_price"] and parsed["sale_price"] > 0:
+                lst.coupang_sale_price = parsed["sale_price"]
+                lst.sale_price = parsed["sale_price"]
+
+            # onSale 상태 조회 (vendor_item_id가 있으면)
+            vid = lst.vendor_item_id
+            if vid:
+                try:
+                    inv_resp = client.get_item_inventory(int(vid))
+                    inv_data = inv_resp.get("data", inv_resp) if isinstance(inv_resp, dict) else {}
+                    on_sale = inv_data.get("onSale", True)
+                    lst.coupang_status = "active" if on_sale else "paused"
+                    # 재고도 업데이트
+                    stock = inv_data.get("amountInStock")
+                    if stock is not None:
+                        lst.stock_quantity = stock
+                except Exception:
+                    pass  # 실패해도 상세 동기화는 계속
 
             # raw_json 저장
             lst.raw_json = json.dumps(detail_data, ensure_ascii=False)

@@ -34,6 +34,9 @@ class Product(Base):
     status = Column(String(20), default='ready', index=True)  # ready, uploaded, excluded
     exclude_reason = Column(Text)  # 제외 사유
 
+    # 등록 승인 상태
+    registration_status = Column(String(20), default='pending_review', index=True)  # pending_review, approved, rejected
+
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -83,6 +86,21 @@ class Product(Base):
             product.exclude_reason = f'순마진 부족 ({margin_info["net_margin"]:,}원 < 0원). 묶음 SKU 필요.'
 
         return product
+
+    @property
+    def is_pending_review(self):
+        """검토 대기 중인 상품인지"""
+        return self.registration_status == 'pending_review'
+
+    @property
+    def is_approved(self):
+        """승인된 상품인지"""
+        return self.registration_status == 'approved'
+
+    @property
+    def can_upload(self):
+        """업로드 가능한 상품인지 (ready + 승인 + 단권가능)"""
+        return self.status == 'ready' and self.registration_status == 'approved' and self.can_upload_single
 
     @property
     def is_profitable(self):

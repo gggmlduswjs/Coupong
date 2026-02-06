@@ -318,10 +318,11 @@ class AladinAPICrawler:
             # 시리즈명 추출 (묶음 SKU용)
             normalized_series = Book.extract_series(normalized_title)
 
-            # 가격 (정가)
-            price = item.get("priceSales", 0)  # 판매가
+            # 가격 (정가) - priceStandard가 정가, priceSales는 이미 10% 할인된 판매가
+            # 도서정가제: 판매가 = 정가 × 0.9 이므로 반드시 정가(priceStandard)를 저장해야 함
+            price = item.get("priceStandard", 0)  # 정가
             if price == 0:
-                price = item.get("priceStandard", 15000)  # 정가
+                price = item.get("priceSales", 15000)  # fallback (정가 없으면 판매가라도)
 
             # 출간일
             pub_date = item.get("pubDate", "")

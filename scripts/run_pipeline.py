@@ -77,6 +77,27 @@ def _migrate_account_columns():
         pass  # 테이블이 아직 없으면 init_db()에서 생성됨
 
 
+def _migrate_product_registration_status():
+    """Product 테이블에 registration_status 컬럼 추가 + 기존 데이터 approved로 설정"""
+    try:
+        inspector = inspect(engine)
+        existing_cols = {col["name"] for col in inspector.get_columns("products")}
+
+        if "registration_status" not in existing_cols:
+            with engine.connect() as conn:
+                conn.execute(text(
+                    "ALTER TABLE products ADD COLUMN registration_status VARCHAR(20) DEFAULT 'pending_review'"
+                ))
+                # 기존 데이터는 이미 운영 중이므로 approved로 설정 (하위 호환)
+                conn.execute(text(
+                    "UPDATE products SET registration_status = 'approved' WHERE registration_status IS NULL OR registration_status = 'pending_review'"
+                ))
+                conn.commit()
+            logger.info("  컬럼 추가: products.registration_status (기존 데이터 → approved)")
+    except Exception:
+        pass  # 테이블이 아직 없으면 init_db()에서 생성됨
+
+
 # ─────────────────────────────────────────────
 # 1단계: DB 초기화 및 시딩
 # ─────────────────────────────────────────────
@@ -96,7 +117,7 @@ def seed_publishers(db):
             continue
 
         margin_rate = pub_data["margin"]
-        supply_rate = (100 - margin_rate) / 100.0
+        supply_rate = margin_rate / 100.0
 
         publisher = Publisher(
             name=pub_data["name"],
@@ -426,10 +447,11 @@ def upload_products(db, method='auto'):
         logger.warning("등록된 계정이 없습니다.")
         return {"api": {}, "csv": {}}
 
-    # 업로드 가능한 단권 상품 (ready 상태)
+    # 업로드 가능한 단권 상품 (ready + 승인된 상태만)
     products = db.query(Product).filter(
         Product.status == 'ready',
-        Product.can_upload_single == True
+        Product.can_upload_single == True,
+        Product.registration_status == 'approved',
     ).all()
 
     if not products:
@@ -546,6 +568,7 @@ def run_pipeline(publisher_names=None, max_results=20, dry_run=False, upload_met
         print("\n[1/6] DB 초기화...")
         init_db()
         _migrate_account_columns()
+        _migrate_product_registration_status()
 
         db = SessionLocal()
 

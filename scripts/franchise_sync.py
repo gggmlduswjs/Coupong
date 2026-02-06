@@ -372,10 +372,11 @@ class FranchiseSync:
                 ...
             }
         """
-        # 업로드 가능한 전체 상품
+        # 업로드 가능한 전체 상품 (승인된 것만)
         all_products = self.db.query(Product).filter(
             Product.status == 'ready',
             Product.can_upload_single == True,
+            Product.registration_status == 'approved',
         ).all()
         total_products = len(all_products)
 

@@ -107,8 +107,19 @@ class WingSyncBase:
         self.db_path = db_path
         self.engine = create_engine(
             f"sqlite:///{db_path}",
-            connect_args={"check_same_thread": False}
+            connect_args={"check_same_thread": False, "timeout": 30}
         )
+        # SQLite WAL 모드 + busy_timeout (동시 접근 허용)
+        from sqlalchemy import event as _sa_event
+        @_sa_event.listens_for(self.engine, "connect")
+        def _set_sqlite_pragma(dbapi_conn, connection_record):
+            cursor = dbapi_conn.cursor()
+            cursor.execute("PRAGMA busy_timeout=30000")
+            try:
+                cursor.execute("PRAGMA journal_mode=WAL")
+            except Exception:
+                pass
+            cursor.close()
 
     def get_accounts(self, account_name: Optional[str] = None) -> List[Dict]:
         """WING API 활성 계정 조회"""

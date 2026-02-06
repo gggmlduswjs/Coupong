@@ -3,6 +3,7 @@ from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, Text, Uniq
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from app.database import Base
+from app.constants import LOW_STOCK_THRESHOLD
 
 
 class Listing(Base):
@@ -39,6 +40,25 @@ class Listing(Base):
     # 판매 정보
     sale_price = Column(Integer, nullable=False)
     shipping_policy = Column(String(20), nullable=False)  # 'free', 'paid'
+
+    # 재고/가격 동기화
+    vendor_item_id = Column(String(50))  # WING API update_inventory() 호출에 필수
+    coupang_sale_price = Column(Integer, default=0)  # 쿠팡 현재 판매가 (목표가와 비교용)
+    stock_quantity = Column(Integer, default=10)  # 현재 재고 수량
+
+    # 상세 API 필드
+    brand = Column(String(200))                    # 브랜드
+    display_category_code = Column(String(20))     # 카테고리코드
+    delivery_charge_type = Column(String(20))      # FREE / NOT_FREE / CONDITIONAL_FREE
+    maximum_buy_count = Column(Integer)            # 쿠팡 실재고 (items[0].maximumBuyCount)
+    supply_price = Column(Integer)                 # 공급가 (items[0].supplyPrice)
+    delivery_charge = Column(Integer)              # 배송비
+    free_ship_over_amount = Column(Integer)        # 무료배송 기준금액
+    return_charge = Column(Integer)                # 반품 배송비
+
+    # Raw data
+    raw_json = Column(Text)                        # 상세 API 전체 응답 JSON
+    detail_synced_at = Column(DateTime)            # 마지막 상세 동기화 시각
 
     # 업로드 정보
     upload_method = Column(String(20))  # csv, playwright
@@ -96,6 +116,23 @@ class Listing(Base):
     def is_pending(self):
         """대기 중인지"""
         return self.coupang_status == 'pending'
+
+    @property
+    def has_price_diff(self):
+        """목표가와 쿠팡가가 다른지"""
+        if not self.coupang_sale_price or self.coupang_sale_price == 0:
+            return False
+        return self.sale_price != self.coupang_sale_price
+
+    @property
+    def is_low_stock(self):
+        """재고가 부족한지"""
+        return (self.stock_quantity or 0) <= LOW_STOCK_THRESHOLD
+
+    @property
+    def can_update(self):
+        """API 업데이트 가능 여부 (vendor_item_id 필수)"""
+        return bool(self.vendor_item_id) and self.coupang_status == 'active'
 
     def get_product_info(self, db_session):
         """상품 정보 조회 (단권/묶음 자동 판별)"""

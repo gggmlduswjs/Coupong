@@ -10,6 +10,8 @@ from app.models.analysis_result import AnalysisResult
 from app.models.task import Task
 from app.models.revenue_history import RevenueHistory
 from app.models.settlement_history import SettlementHistory
+from app.models.ad_spend import AdSpend
+from app.models.order import Order
 
 __all__ = [
     "Account",
@@ -23,4 +25,6 @@ __all__ = [
     "Task",
     "RevenueHistory",
     "SettlementHistory",
+    "AdSpend",
+    "Order",
 ]

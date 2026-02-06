@@ -45,7 +45,7 @@ class CoupangWingClient:
     SELLER_PRODUCTS_PATH = "/v2/providers/seller_api/apis/api/v1/marketplace/seller-products"
     VENDOR_ITEMS_PATH = "/v2/providers/seller_api/apis/api/v1/marketplace/vendor-items"
     CATEGORY_PREDICT_PATH = "/v2/providers/openapi/apis/api/v1/categorization/predict"
-    DISPLAY_CATEGORIES_PATH = "/v2/providers/openapi/apis/api/v1/products/display-categories"
+    DISPLAY_CATEGORIES_PATH = "/v2/providers/seller_api/apis/api/v1/marketplace/meta/display-categories"
     CATEGORY_META_PATH = "/v2/providers/seller_api/apis/api/v1/marketplace/meta/category-related-metas/display-category-codes"
     SELLER_AUTO_GEN_PATH = "/v2/providers/seller_api/apis/api/v1/marketplace/seller/auto-generated"
 
@@ -619,20 +619,32 @@ class CoupangWingClient:
     # 카테고리
     # ─────────────────────────────────────────────
 
-    def recommend_category(self, product_name: str, brand: Optional[str] = None) -> Dict[str, Any]:
+    def recommend_category(self, product_name: str, brand: Optional[str] = None,
+                           product_description: Optional[str] = None,
+                           attributes: Optional[Dict[str, str]] = None,
+                           seller_sku_code: Optional[str] = None) -> Dict[str, Any]:
         """
-        카테고리 추천 (상품명 기반)
+        카테고리 추천 (상품명 기반 ML 모델)
 
         Args:
-            product_name: 상품명
-            brand: 브랜드명 (옵션)
+            product_name: 상품명 (필수, 상세할수록 정확)
+            brand: 브랜드명
+            product_description: 상품 상세설명
+            attributes: 상품속성 (예: {"소재": "면", "색상": "검정"})
+            seller_sku_code: 판매자 상품코드
 
         Returns:
-            추천 카테고리 정보
+            {autoCategorizationPredictionResultType, predictedCategoryId, predictedCategoryName, comment}
         """
-        data = {"productName": product_name}
+        data: Dict[str, Any] = {"productName": product_name}
         if brand:
             data["brand"] = brand
+        if product_description:
+            data["productDescription"] = product_description
+        if attributes:
+            data["attributes"] = attributes
+        if seller_sku_code:
+            data["sellerSkuCode"] = seller_sku_code
         return self._request("POST", self.CATEGORY_PREDICT_PATH, data=data)
 
     def get_category_meta(self, display_category_code: str) -> Dict[str, Any]:
@@ -650,15 +662,49 @@ class CoupangWingClient:
 
     def get_display_categories(self, display_category_code: str) -> Dict[str, Any]:
         """
-        디스플레이 카테고리 조회
+        카테고리 조회 (1-depth 하위 카테고리 포함)
 
         Args:
-            display_category_code: 카테고리 코드
+            display_category_code: 카테고리 코드 (0이면 최상위 1-depth)
 
         Returns:
-            카테고리 정보
+            {displayItemCategoryCode, name, status, child: [...]}
         """
         path = f"{self.DISPLAY_CATEGORIES_PATH}/{display_category_code}"
+        return self._request("GET", path)
+
+    def list_all_categories(self) -> Dict[str, Any]:
+        """
+        카테고리 목록 전체 조회 (트리 구조)
+
+        Returns:
+            전체 카테고리 트리 {displayItemCategoryCode, name, status, child: [...]}
+        """
+        return self._request("GET", self.DISPLAY_CATEGORIES_PATH)
+
+    def validate_category(self, display_category_code: str) -> Dict[str, Any]:
+        """
+        카테고리 유효성 검사 (leaf 카테고리 여부 + 사용 가능 여부)
+
+        Args:
+            display_category_code: 노출카테고리코드
+
+        Returns:
+            {code: "SUCCESS", data: true/false}
+            - data=true: 유효한 leaf 카테고리
+            - 400 에러: leaf가 아니면 에러 메시지에 leaf ID 목록 포함
+        """
+        path = f"{self.DISPLAY_CATEGORIES_PATH}/{display_category_code}/status"
+        return self._request("GET", path)
+
+    def check_auto_category_agreed(self) -> Dict[str, Any]:
+        """
+        카테고리 자동매칭 서비스 동의 확인
+
+        Returns:
+            {code: "SUCCESS", data: true/false}
+        """
+        path = f"/v2/providers/seller_api/apis/api/v1/marketplace/vendors/{self.vendor_id}/check-auto-category-agreed"
         return self._request("GET", path)
 
     # ─────────────────────────────────────────────
@@ -691,25 +737,247 @@ class CoupangWingClient:
     # 발주서/매출
     # ─────────────────────────────────────────────
 
-    def get_ordersheets(self, created_at_from: str, created_at_to: str, status: str = "ACCEPT") -> Dict[str, Any]:
+    def get_ordersheets(
+        self,
+        created_at_from: str,
+        created_at_to: str,
+        status: str = "ACCEPT",
+        max_per_page: int = 50,
+        next_token: str = "",
+    ) -> Dict[str, Any]:
         """
-        발주서 조회
+        발주서 목록 조회 (일단위 페이징)
 
         Args:
-            created_at_from: 시작일시 (ISO 8601)
+            created_at_from: 시작일시 (ISO 8601, 예: 2026-01-01)
             created_at_to: 종료일시 (ISO 8601)
-            status: 발주 상태 (ACCEPT, INSTRUCT, DEPARTURE, DELIVERY 등)
+            status: 발주 상태 (ACCEPT, INSTRUCT, DEPARTURE, DELIVERING, FINAL_DELIVERY, NONE_TRACKING)
+            max_per_page: 페이지당 최대 건수 (기본 50)
+            next_token: 페이징 토큰
 
         Returns:
-            발주서 목록
+            발주서 목록 + 페이징 정보
         """
-        path = f"/v2/providers/openapi/apis/api/v5/vendors/{self.vendor_id}/ordersheets"
+        path = f"/v2/providers/openapi/apis/api/v4/vendors/{self.vendor_id}/ordersheets"
         params = {
             "createdAtFrom": created_at_from,
             "createdAtTo": created_at_to,
             "status": status,
+            "maxPerPage": str(max_per_page),
         }
+        if next_token:
+            params["nextToken"] = next_token
         return self._request("GET", path, params=params)
+
+    def get_all_ordersheets(
+        self,
+        created_at_from: str,
+        created_at_to: str,
+        status: str = "ACCEPT",
+    ) -> List[Dict]:
+        """
+        발주서 전체 조회 (자동 페이징)
+
+        Args:
+            created_at_from: 시작일시
+            created_at_to: 종료일시
+            status: 발주 상태
+
+        Returns:
+            전체 발주서 리스트
+        """
+        all_data = []
+        next_token = ""
+        page = 0
+        while True:
+            result = self.get_ordersheets(created_at_from, created_at_to, status, next_token=next_token)
+            data = result.get("data", [])
+            if isinstance(data, list):
+                all_data.extend(data)
+            elif isinstance(data, dict):
+                items = data.get("orderSheets", data.get("items", []))
+                all_data.extend(items)
+                data = items
+            page += 1
+            logger.info(f"  발주서 페이지 {page}: {len(data) if isinstance(data, list) else '?'}건 (상태: {status})")
+
+            next_token = result.get("nextToken", "")
+            if not next_token:
+                if isinstance(result.get("data"), dict):
+                    next_token = result["data"].get("nextToken", "")
+            if not next_token:
+                break
+        return all_data
+
+    def get_ordersheet_by_shipment(self, shipment_box_id: int) -> Dict[str, Any]:
+        """
+        발주서 단건 조회 (묶음배송번호)
+
+        Args:
+            shipment_box_id: 묶음배송번호
+
+        Returns:
+            발주서 상세 정보
+        """
+        path = f"/v2/providers/openapi/apis/api/v4/vendors/{self.vendor_id}/ordersheets/{shipment_box_id}"
+        return self._request("GET", path)
+
+    def get_ordersheet_by_order(self, order_id: int) -> Dict[str, Any]:
+        """
+        발주서 단건 조회 (주문번호)
+
+        Args:
+            order_id: 주문번호
+
+        Returns:
+            발주서 상세 정보
+        """
+        path = f"/v2/providers/openapi/apis/api/v4/vendors/{self.vendor_id}/ordersheets/orderId/{order_id}"
+        return self._request("GET", path)
+
+    def get_ordersheet_history(self, shipment_box_id: int) -> Dict[str, Any]:
+        """
+        발주서 배송상태 히스토리 조회
+
+        Args:
+            shipment_box_id: 묶음배송번호
+
+        Returns:
+            배송상태 변경 이력
+        """
+        path = f"/v2/providers/openapi/apis/api/v4/vendors/{self.vendor_id}/ordersheets/{shipment_box_id}/history"
+        return self._request("GET", path)
+
+    def acknowledge_ordersheets(self, shipment_box_ids: List[int]) -> Dict[str, Any]:
+        """
+        발주서 확인 (상품준비중 처리: ACCEPT → INSTRUCT)
+
+        Args:
+            shipment_box_ids: 묶음배송번호 리스트
+
+        Returns:
+            처리 결과
+        """
+        path = f"/v2/providers/openapi/apis/api/v4/vendors/{self.vendor_id}/ordersheets/acknowledgement"
+        data = {"shipmentBoxIds": shipment_box_ids}
+        return self._request("PUT", path, data=data)
+
+    def upload_invoice(self, invoice_data_list: List[Dict]) -> Dict[str, Any]:
+        """
+        송장 업로드 (운송장 등록)
+
+        Args:
+            invoice_data_list: 송장 데이터 리스트
+                [{shipmentBoxId, orderId, vendorItemId, deliveryCompanyCode, invoiceNumber, splitShipping(optional)}]
+
+        Returns:
+            업로드 결과
+        """
+        path = f"/v2/providers/openapi/apis/api/v4/vendors/{self.vendor_id}/ordersheets/invoices"
+        data = {"orderSheetInvoices": invoice_data_list}
+        return self._request("POST", path, data=data)
+
+    def update_invoice(self, invoice_data_list: List[Dict]) -> Dict[str, Any]:
+        """
+        송장 업데이트 (운송장 수정)
+
+        Args:
+            invoice_data_list: 수정할 송장 데이터 리스트
+                [{shipmentBoxId, orderId, vendorItemId, deliveryCompanyCode, invoiceNumber, splitShipping(optional)}]
+
+        Returns:
+            업데이트 결과
+        """
+        path = f"/v2/providers/openapi/apis/api/v4/vendors/{self.vendor_id}/ordersheets/invoices"
+        data = {"orderSheetInvoices": invoice_data_list}
+        return self._request("PUT", path, data=data)
+
+    def stop_shipment(self, receipt_id: int, cancel_count: int) -> Dict[str, Any]:
+        """
+        출고중지 완료 처리
+
+        Args:
+            receipt_id: 접수번호 (receiptId)
+            cancel_count: 취소수량
+
+        Returns:
+            처리 결과
+        """
+        path = f"/v2/providers/openapi/apis/api/v4/vendors/{self.vendor_id}/ordersheets/cancellation/stopShipment"
+        data = {"receiptId": receipt_id, "cancelCount": cancel_count}
+        return self._request("PUT", path, data=data)
+
+    def complete_shipment(self, receipt_id: int, delivery_company_code: str, invoice_number: str) -> Dict[str, Any]:
+        """
+        이미출고 완료 처리
+
+        Args:
+            receipt_id: 접수번호
+            delivery_company_code: 택배사 코드
+            invoice_number: 운송장번호
+
+        Returns:
+            처리 결과
+        """
+        path = f"/v2/providers/openapi/apis/api/v4/vendors/{self.vendor_id}/ordersheets/cancellation/completeShipment"
+        data = {
+            "receiptId": receipt_id,
+            "deliveryCompanyCode": delivery_company_code,
+            "invoiceNumber": invoice_number,
+        }
+        return self._request("PUT", path, data=data)
+
+    def cancel_order(
+        self,
+        order_id: int,
+        vendor_item_ids: List[int],
+        receipt_counts: List[int],
+        cancel_type: str = "VENDOR",
+        cancel_reason_category: str = "SOLD_OUT",
+        cancel_reason: str = "재고 소진",
+    ) -> Dict[str, Any]:
+        """
+        주문 취소 요청
+
+        Args:
+            order_id: 주문번호
+            vendor_item_ids: 취소할 옵션ID 리스트
+            receipt_counts: 각 옵션별 취소수량 리스트
+            cancel_type: 취소유형 (VENDOR/BUYER)
+            cancel_reason_category: 취소사유 카테고리
+            cancel_reason: 취소사유 상세
+
+        Returns:
+            취소 요청 결과
+        """
+        path = f"/v2/providers/openapi/apis/api/v4/vendors/{self.vendor_id}/ordersheets/cancel"
+        order_items = [
+            {"vendorItemId": vid, "receiptCount": cnt}
+            for vid, cnt in zip(vendor_item_ids, receipt_counts)
+        ]
+        data = {
+            "orderId": order_id,
+            "cancelType": cancel_type,
+            "cancelReasonCategory": cancel_reason_category,
+            "cancelReason": cancel_reason,
+            "orderItems": order_items,
+        }
+        return self._request("PUT", path, data=data)
+
+    def complete_long_term_undelivery(self, shipment_box_id: int, invoice_number: str) -> Dict[str, Any]:
+        """
+        장기미배송 완료 처리
+
+        Args:
+            shipment_box_id: 묶음배송번호
+            invoice_number: 운송장번호
+
+        Returns:
+            처리 결과
+        """
+        path = f"/v2/providers/openapi/apis/api/v4/vendors/{self.vendor_id}/ordersheets/{shipment_box_id}/long-term-undelivery"
+        data = {"invoiceNumber": invoice_number}
+        return self._request("PUT", path, data=data)
 
     # ─────────────────────────────────────────────
     # 매출 내역

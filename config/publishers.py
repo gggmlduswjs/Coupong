@@ -13,7 +13,7 @@ PUBLISHERS = [
     {"name": "영진", "margin": 55, "min_free_shipping": 14400},
 
     # 매입률 60%
-    {"name": "이퓨쳐", "margin": 60, "min_free_shipping": 18000},
+    {"name": "이퓨처", "margin": 60, "min_free_shipping": 18000},
     {"name": "사회평론", "margin": 60, "min_free_shipping": 18000},
     {"name": "길벗", "margin": 60, "min_free_shipping": 18000},
     {"name": "아티오", "margin": 60, "min_free_shipping": 18000},
@@ -42,7 +42,7 @@ PUBLISHERS = [
     {"name": "이투스", "margin": 65, "min_free_shipping": 23900},
     {"name": "비상교육", "margin": 65, "min_free_shipping": 23900},
     {"name": "능률교육", "margin": 65, "min_free_shipping": 23900},
-    {"name": "씨톡", "margin": 65, "min_free_shipping": 23900},
+    {"name": "씨투", "margin": 65, "min_free_shipping": 23900},
     {"name": "지학사", "margin": 65, "min_free_shipping": 23900},
     {"name": "수경출판사", "margin": 65, "min_free_shipping": 23900},
     {"name": "쏠티북스", "margin": 65, "min_free_shipping": 23900},
@@ -97,11 +97,11 @@ def calculate_profit(publisher_name: str, sale_price: int):
     if not info:
         return 0
 
-    # 매입가 = 판매가 × (100 - 매입률) / 100
-    purchase_price = sale_price * (100 - info["margin"]) / 100
+    # 매입가 = 판매가 × 공급율 / 100
+    purchase_price = sale_price * info["margin"] / 100
 
-    # 수익 = 판매가 - 매입가 - 쿠팡 수수료(10%)
-    coupang_fee = sale_price * 0.10
+    # 수익 = 판매가 - 매입가 - 쿠팡 수수료(11%)
+    coupang_fee = sale_price * 0.11
     profit = sale_price - purchase_price - coupang_fee
 
     return int(profit)
