@@ -47,6 +47,7 @@ class CoupangWingClient:
     CATEGORY_PREDICT_PATH = "/v2/providers/openapi/apis/api/v1/categorization/predict"
     DISPLAY_CATEGORIES_PATH = "/v2/providers/openapi/apis/api/v1/products/display-categories"
     CATEGORY_META_PATH = "/v2/providers/seller_api/apis/api/v1/marketplace/meta/category-related-metas/display-category-codes"
+    SELLER_AUTO_GEN_PATH = "/v2/providers/seller_api/apis/api/v1/marketplace/seller/auto-generated"
 
     def __init__(self, vendor_id: str, access_key: str, secret_key: str):
         self.vendor_id = vendor_id
@@ -350,18 +351,113 @@ class CoupangWingClient:
         path = f"{self.SELLER_PRODUCTS_PATH}/{seller_product_id}"
         return self._request("DELETE", path)
 
-    def stop_sale(self, seller_product_id: int) -> Dict[str, Any]:
+    def get_inflow_status(self) -> Dict[str, Any]:
         """
-        판매 중지 (상품 유지, 판매만 중지)
+        상품 등록 현황 조회
+
+        Returns:
+            등록 현황 (전체/승인대기/승인완료/반려 등 카운트)
+        """
+        path = f"{self.SELLER_PRODUCTS_PATH}/inflow-status"
+        return self._request("GET", path)
+
+    def get_product_partial(self, seller_product_id: int) -> Dict[str, Any]:
+        """
+        상품 조회 (승인 불필요 항목만)
 
         Args:
             seller_product_id: 상품 ID
 
         Returns:
-            중지 결과
+            승인 불필요 항목 상세 정보
         """
-        path = f"{self.SELLER_PRODUCTS_PATH}/{seller_product_id}/sales/stop"
+        path = f"{self.SELLER_PRODUCTS_PATH}/{seller_product_id}/partial"
+        return self._request("GET", path)
+
+    def approve_product(self, seller_product_id: int) -> Dict[str, Any]:
+        """
+        상품 승인 요청
+
+        Args:
+            seller_product_id: 승인 요청할 상품 ID
+
+        Returns:
+            승인 요청 결과
+        """
+        path = f"{self.SELLER_PRODUCTS_PATH}/{seller_product_id}/approve"
         return self._request("PUT", path)
+
+    def list_products_by_timeframe(
+        self,
+        vendor_id: str,
+        created_at_from: str,
+        created_at_to: str,
+        max_per_page: int = 50,
+        status: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        상품 목록 구간 조회 (생성일 기준)
+
+        Args:
+            vendor_id: 벤더 ID
+            created_at_from: 시작일시 (ISO 8601, 예: 2026-01-01T00:00:00)
+            created_at_to: 종료일시 (ISO 8601)
+            max_per_page: 페이지당 상품 수 (최대 100)
+            status: 상품 상태 필터 (옵션)
+
+        Returns:
+            상품 목록 + 페이징 정보
+        """
+        path = f"{self.SELLER_PRODUCTS_PATH}/by-timeframe"
+        params = {
+            "vendorId": vendor_id,
+            "createdAtFrom": created_at_from,
+            "createdAtTo": created_at_to,
+            "maxPerPage": str(max_per_page),
+        }
+        if status:
+            params["status"] = status
+        return self._request("GET", path, params=params)
+
+    def get_product_history(
+        self,
+        seller_product_id: int,
+        next_token: Optional[str] = None,
+        max_per_page: int = 10,
+    ) -> Dict[str, Any]:
+        """
+        상품 상태변경이력 조회
+
+        Args:
+            seller_product_id: 상품 ID
+            next_token: 페이징 토큰
+            max_per_page: 페이지당 건수 (기본 10)
+
+        Returns:
+            상태변경 이력 목록
+        """
+        path = f"{self.SELLER_PRODUCTS_PATH}/{seller_product_id}/histories"
+        params = {"maxPerPage": str(max_per_page)}
+        if next_token:
+            params["nextToken"] = next_token
+        return self._request("GET", path, params=params)
+
+    def get_product_by_sku(self, external_vendor_sku_code: str) -> Dict[str, Any]:
+        """
+        SKU 코드로 상품 요약 정보 조회
+
+        Args:
+            external_vendor_sku_code: 외부 벤더 SKU 코드
+
+        Returns:
+            상품 요약 정보
+        """
+        path = f"{self.VENDOR_ITEMS_PATH}/external-vendor-sku-codes/{external_vendor_sku_code}"
+        return self._request("GET", path)
+
+    def stop_sale(self, vendor_item_id: int) -> Dict[str, Any]:
+        """(deprecated: stop_item_sale 사용 권장) 아이템별 판매 중지"""
+        return self.stop_item_sale(vendor_item_id)
 
     # ─────────────────────────────────────────────
     # 재고/가격 관리
@@ -415,6 +511,109 @@ class CoupangWingClient:
         price_result = self.update_price(vendor_item_id, price)
         quantity_result = self.update_quantity(vendor_item_id, quantity)
         return {"price": price_result, "quantity": quantity_result}
+
+    def get_item_inventory(self, vendor_item_id: int) -> Dict[str, Any]:
+        """
+        아이템별 수량/가격/상태 조회
+
+        Args:
+            vendor_item_id: 벤더 아이템 ID
+
+        Returns:
+            아이템 재고/가격/판매상태 정보
+        """
+        path = f"{self.VENDOR_ITEMS_PATH}/{vendor_item_id}/inventories"
+        return self._request("GET", path)
+
+    def update_original_price(self, vendor_item_id: int, original_price: int) -> Dict[str, Any]:
+        """
+        아이템별 할인율 기준가격 변경
+
+        Args:
+            vendor_item_id: 벤더 아이템 ID
+            original_price: 할인율 기준가격 (원래가격)
+
+        Returns:
+            변경 결과
+        """
+        path = f"{self.VENDOR_ITEMS_PATH}/{vendor_item_id}/original-prices/{original_price}"
+        return self._request("PUT", path)
+
+    def stop_item_sale(self, vendor_item_id: int) -> Dict[str, Any]:
+        """
+        아이템별 판매 중지
+
+        Args:
+            vendor_item_id: 벤더 아이템 ID
+
+        Returns:
+            중지 결과
+        """
+        path = f"{self.VENDOR_ITEMS_PATH}/{vendor_item_id}/sales/stop"
+        return self._request("PUT", path)
+
+    def resume_item_sale(self, vendor_item_id: int) -> Dict[str, Any]:
+        """
+        아이템별 판매 재개
+
+        Args:
+            vendor_item_id: 벤더 아이템 ID
+
+        Returns:
+            재개 결과
+        """
+        path = f"{self.VENDOR_ITEMS_PATH}/{vendor_item_id}/sales/resume"
+        return self._request("PUT", path)
+
+    # ─────────────────────────────────────────────
+    # 자동생성옵션
+    # ─────────────────────────────────────────────
+
+    def enable_auto_option(self, vendor_item_id: int) -> Dict[str, Any]:
+        """
+        자동생성옵션 활성화 (단일 옵션)
+
+        Args:
+            vendor_item_id: 벤더 아이템 ID
+
+        Returns:
+            활성화 결과
+        """
+        path = f"{self.SELLER_AUTO_GEN_PATH}/{vendor_item_id}/enable"
+        return self._request("POST", path)
+
+    def enable_auto_option_all(self) -> Dict[str, Any]:
+        """
+        자동생성옵션 활성화 (전체)
+
+        Returns:
+            전체 활성화 결과
+        """
+        path = f"{self.SELLER_AUTO_GEN_PATH}/enable-all"
+        return self._request("POST", path)
+
+    def disable_auto_option(self, vendor_item_id: int) -> Dict[str, Any]:
+        """
+        자동생성옵션 비활성화 (단일 옵션)
+
+        Args:
+            vendor_item_id: 벤더 아이템 ID
+
+        Returns:
+            비활성화 결과
+        """
+        path = f"{self.SELLER_AUTO_GEN_PATH}/{vendor_item_id}/disable"
+        return self._request("POST", path)
+
+    def disable_auto_option_all(self) -> Dict[str, Any]:
+        """
+        자동생성옵션 비활성화 (전체)
+
+        Returns:
+            전체 비활성화 결과
+        """
+        path = f"{self.SELLER_AUTO_GEN_PATH}/disable-all"
+        return self._request("POST", path)
 
     # ─────────────────────────────────────────────
     # 카테고리
