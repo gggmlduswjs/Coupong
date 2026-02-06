@@ -1,5 +1,5 @@
 """Playwright 자동 업로더"""
-from typing import Dict
+from typing import Dict, List
 from playwright.async_api import async_playwright, Page
 from pathlib import Path
 import time

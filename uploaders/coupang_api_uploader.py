@@ -12,8 +12,10 @@ WING API를 통해 직접 상품 등록
     uploader = CoupangAPIUploader(client)
     result = uploader.upload_product(product_data, outbound_code, return_code)
 """
+import json
 import logging
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, Any, List, Optional
 
 import re
@@ -21,8 +23,16 @@ import re
 from app.api.coupang_wing_client import CoupangWingClient, CoupangWingError
 from app.constants import BOOK_PRODUCT_DEFAULTS, BOOK_CATEGORY_CODE
 
+# 캐시 디렉토리
+CACHE_DIR = Path(__file__).parent.parent / "cache"
+CATEGORY_CACHE_FILE = CACHE_DIR / "category_cache.json"
+
 # 쿠팡 바코드로 사용 가능한 ISBN-13 패턴 (978/979로 시작하는 13자리)
 _VALID_BARCODE_RE = re.compile(r'^97[89]\d{10}$')
+
+# 검색태그 허용 특수문자 (이외 특수문자 제거)
+_SEARCH_TAG_ALLOWED_SPECIAL = set("!@#$%^&*-+;:'.")
+_SEARCH_TAG_STRIP_RE = re.compile(r'[^\w\s!@#$%^&*\-+;:\'.]+', re.UNICODE)
 
 logger = logging.getLogger(__name__)
 
@@ -36,23 +46,89 @@ DEFAULT_RETURN_INFO = {
 }
 
 
+class CategoryCache:
+    """
+    파일 기반 카테고리 캐시
+
+    인메모리 + 파일 영구 저장으로 세션 간 캐시 유지
+    """
+
+    def __init__(self, cache_file: Path = CATEGORY_CACHE_FILE):
+        self.cache_file = cache_file
+        self._cache: Dict[str, str] = {}
+        self._dirty = False
+        self._load()
+
+    def _load(self):
+        """파일에서 캐시 로드"""
+        try:
+            if self.cache_file.exists():
+                with open(self.cache_file, "r", encoding="utf-8") as f:
+                    self._cache = json.load(f)
+                logger.info(f"카테고리 캐시 로드: {len(self._cache)}개")
+        except (json.JSONDecodeError, IOError) as e:
+            logger.warning(f"캐시 로드 실패: {e}")
+            self._cache = {}
+
+    def save(self):
+        """캐시를 파일에 저장"""
+        if not self._dirty:
+            return
+
+        try:
+            self.cache_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.cache_file, "w", encoding="utf-8") as f:
+                json.dump(self._cache, f, ensure_ascii=False, indent=2)
+            self._dirty = False
+            logger.debug(f"카테고리 캐시 저장: {len(self._cache)}개")
+        except IOError as e:
+            logger.error(f"캐시 저장 실패: {e}")
+
+    def get(self, key: str) -> Optional[str]:
+        """캐시에서 카테고리 코드 조회"""
+        return self._cache.get(key)
+
+    def set(self, key: str, value: str):
+        """캐시에 카테고리 코드 저장"""
+        self._cache[key] = value
+        self._dirty = True
+
+    def __contains__(self, key: str) -> bool:
+        return key in self._cache
+
+    def __len__(self) -> int:
+        return len(self._cache)
+
+
 class CoupangAPIUploader:
     """쿠팡 WING API를 통한 상품 등록"""
+
+    # 클래스 레벨 캐시 (전체 인스턴스 공유)
+    _category_cache: Optional[CategoryCache] = None
 
     def __init__(self, client: CoupangWingClient, vendor_user_id: str = ""):
         self.client = client
         self.vendor_user_id = vendor_user_id
-        self._category_cache: Dict[str, str] = {}
+
+        # 클래스 레벨 캐시 초기화 (최초 1회만)
+        if CoupangAPIUploader._category_cache is None:
+            CoupangAPIUploader._category_cache = CategoryCache()
+
+    @property
+    def category_cache(self) -> CategoryCache:
+        """카테고리 캐시 접근"""
+        return CoupangAPIUploader._category_cache
 
     def recommend_category(self, product_name: str) -> str:
         """
         카테고리 추천 API로 상품 카테고리 코드 조회
 
-        캐시를 활용하여 동일 상품명의 중복 API 호출 방지.
+        파일 기반 영구 캐시를 활용하여 동일 상품명의 중복 API 호출 방지.
         API 실패 시 기본 카테고리 코드(BOOK_CATEGORY_CODE) 반환.
         """
-        if product_name in self._category_cache:
-            return self._category_cache[product_name]
+        cached = self.category_cache.get(product_name)
+        if cached:
+            return cached
 
         try:
             result = self.client.recommend_category(product_name)
@@ -60,13 +136,14 @@ class CoupangAPIUploader:
             code = str(data.get("predictedCategoryId", ""))
 
             if code and data.get("autoCategorizationPredictionResultType") == "SUCCESS":
-                self._category_cache[product_name] = code
+                self.category_cache.set(product_name, code)
+                self.category_cache.save()  # 즉시 저장
                 logger.debug(f"  카테고리 추천: {product_name[:30]} -> {code}")
                 return code
         except CoupangWingError as e:
             logger.warning(f"  카테고리 추천 실패: {product_name[:30]} -> {e}")
 
-        self._category_cache[product_name] = BOOK_CATEGORY_CODE
+        self.category_cache.set(product_name, BOOK_CATEGORY_CODE)
         return BOOK_CATEGORY_CODE
 
     def build_product_payload(
@@ -96,6 +173,11 @@ class CoupangAPIUploader:
         image_url = product_data.get("main_image_url", "")
         description = product_data.get("description", "상세페이지 참조")
         shipping_policy = product_data.get("shipping_policy", "free")
+
+        # API 문자열 길이 제한 적용
+        seller_product_name = title[:100]
+        display_product_name = (f"{publisher} {title}" if publisher else title)[:100]
+        item_name = title[:150]
 
         # 카테고리 코드
         if not category_code:
@@ -138,11 +220,11 @@ class CoupangAPIUploader:
 
         payload = {
             "displayCategoryCode": int(category_code),
-            "sellerProductName": title,
+            "sellerProductName": seller_product_name,
             "vendorId": self.client.vendor_id,
             "saleStartedAt": sale_started,
             "saleEndedAt": "2099-12-31T00:00:00",
-            "displayProductName": f"{publisher} {title}" if publisher else title,
+            "displayProductName": display_product_name,
             "brand": publisher or "기타",
             "generalProductName": title,
             "productGroup": "",
@@ -155,7 +237,6 @@ class CoupangAPIUploader:
             "remoteAreaDeliverable": BOOK_PRODUCT_DEFAULTS["remoteAreaDeliverable"],
             "unionDeliveryType": BOOK_PRODUCT_DEFAULTS["unionDeliveryType"],
             "returnCharge": BOOK_PRODUCT_DEFAULTS["returnCharge"],
-            "returnChargeVendor": BOOK_PRODUCT_DEFAULTS["returnChargeVendor"],
             "returnCenterCode": return_center_code,
             "returnChargeName": ret["returnChargeName"],
             "companyContactNumber": ret["companyContactNumber"],
@@ -166,9 +247,10 @@ class CoupangAPIUploader:
             "vendorUserId": self.vendor_user_id,
             "requested": BOOK_PRODUCT_DEFAULTS["requested"],
             "manufacture": publisher or "기타",
+            "bundleInfo": {"bundleType": "SINGLE"},
             "items": [
                 {
-                    "itemName": title,
+                    "itemName": item_name,
                     "originalPrice": list_price,
                     "salePrice": sale_price,
                     "maximumBuyCount": 1000,
@@ -184,6 +266,7 @@ class CoupangAPIUploader:
                     "offerCondition": BOOK_PRODUCT_DEFAULTS["offerCondition"],
                     "barcode": isbn if _VALID_BARCODE_RE.match(isbn) else "",
                     "emptyBarcode": not _VALID_BARCODE_RE.match(isbn),
+                    "emptyBarcodeReason": "" if _VALID_BARCODE_RE.match(isbn) else "도서 바코드 없음",
                     "modelNo": "",
                     "externalVendorSku": isbn,
                     "searchTags": search_tags,
@@ -238,10 +321,23 @@ class CoupangAPIUploader:
                 }
 
             data = result.get("data", "")
+
+            # 중첩 응답: {"code":"200","data":{"code":"SUCCESS","data":427011919}}
             if isinstance(data, dict):
-                seller_product_id = str(data.get("sellerProductId", ""))
+                inner_code = data.get("code", "")
+                if inner_code == "ERROR":
+                    msg = data.get("message", "알 수 없는 오류")
+                    logger.error(f"  [FAIL] {product_name[:40]} -> {msg[:200]}")
+                    return {
+                        "success": False,
+                        "seller_product_id": "",
+                        "message": msg,
+                    }
+                seller_product_id = str(data.get("data", ""))
             else:
+                # 평탄 응답: {"code":"SUCCESS","data":427011919}
                 seller_product_id = str(data) if data else ""
+
             logger.info(f"  [OK] {product_name[:40]} -> ID={seller_product_id}")
             return {
                 "success": True,
@@ -407,11 +503,15 @@ class CoupangAPIUploader:
             year = year_match.group()
             tags.extend([t for t in [f"{year}년", f"{year}신간"] if t not in tags])
 
-        # 중복 제거 + 최대 20개
+        # 중복 제거 + 유효성 검증 + 최대 20개
         seen = set()
         unique_tags = []
         for t in tags:
-            if t not in seen:
+            # 허용되지 않는 특수문자 제거
+            t = _SEARCH_TAG_STRIP_RE.sub('', t).strip()
+            # 개당 20자 제한
+            t = t[:20]
+            if t and t not in seen:
                 seen.add(t)
                 unique_tags.append(t)
         return unique_tags[:20]

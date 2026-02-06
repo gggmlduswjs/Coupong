@@ -20,6 +20,11 @@ import requests
 
 logger = logging.getLogger(__name__)
 
+# 재시도 설정
+MAX_RETRIES = 3
+RETRY_BASE_DELAY = 1.0  # 초
+RETRYABLE_STATUS_CODES = (429, 500, 502, 503, 504)
+
 
 class CoupangWingError(Exception):
     """쿠팡 WING API 오류"""
@@ -86,9 +91,10 @@ class CoupangWingClient:
         params: Optional[Dict] = None,
         data: Optional[Dict] = None,
         timeout: int = 30,
+        retry: bool = True,
     ) -> Dict[str, Any]:
         """
-        공통 API 요청
+        공통 API 요청 (재시도 로직 포함)
 
         Args:
             method: HTTP 메서드 (GET, POST, PUT, DELETE)
@@ -96,6 +102,7 @@ class CoupangWingClient:
             params: 쿼리 파라미터
             data: 요청 바디 (JSON)
             timeout: 요청 타임아웃 (초)
+            retry: 재시도 활성화 여부
 
         Returns:
             API 응답 JSON
@@ -103,56 +110,124 @@ class CoupangWingClient:
         Raises:
             CoupangWingError: API 오류 발생 시
         """
-        self._throttle()
+        max_attempts = MAX_RETRIES if retry else 1
+        last_error = None
 
-        # 쿼리 스트링 구성 (순서 유지 - 쿠팡 API는 원본 순서 사용)
-        query = ""
-        if params:
-            query = "&".join(f"{k}={v}" for k, v in params.items())
+        for attempt in range(1, max_attempts + 1):
+            self._throttle()
 
-        # HMAC 서명 생성
-        authorization = self._generate_hmac(method.upper(), path, query)
+            # 쿼리 스트링 구성 (순서 유지 - 쿠팡 API는 원본 순서 사용)
+            query = ""
+            if params:
+                query = "&".join(f"{k}={v}" for k, v in params.items())
 
-        url = f"{self.BASE_URL}{path}"
-        if query:
-            url = f"{url}?{query}"
+            # HMAC 서명 생성
+            authorization = self._generate_hmac(method.upper(), path, query)
 
-        headers = {
-            "Authorization": authorization,
-            "Content-Type": "application/json;charset=UTF-8",
-            "X-EXTENDED-TIMEOUT": "90000",
-        }
+            url = f"{self.BASE_URL}{path}"
+            if query:
+                url = f"{url}?{query}"
 
-        logger.debug(f"WING API {method} {path} params={params}")
+            headers = {
+                "Authorization": authorization,
+                "Content-Type": "application/json;charset=UTF-8",
+                "X-EXTENDED-TIMEOUT": "90000",
+            }
 
-        try:
-            response = self._session.request(
-                method=method.upper(),
-                url=url,
-                headers=headers,
-                json=data,
-                timeout=timeout,
-            )
-        except requests.RequestException as e:
-            raise CoupangWingError("NETWORK_ERROR", f"요청 실패: {e}")
+            logger.debug(f"WING API {method} {path} params={params} (시도 {attempt}/{max_attempts})")
 
-        # 응답 처리
-        if response.status_code == 200:
             try:
-                return response.json()
-            except ValueError:
-                return {"data": response.text}
+                response = self._session.request(
+                    method=method.upper(),
+                    url=url,
+                    headers=headers,
+                    json=data,
+                    timeout=timeout,
+                )
 
-        # 오류 처리
+                # 재시도 가능한 상태 코드 확인
+                if response.status_code in RETRYABLE_STATUS_CODES:
+                    if attempt < max_attempts:
+                        delay = self._calculate_retry_delay(attempt)
+                        logger.warning(
+                            f"재시도 가능 상태 {response.status_code}, "
+                            f"{delay:.1f}초 후 재시도 ({attempt}/{max_attempts})"
+                        )
+                        time.sleep(delay)
+                        continue
+
+                # 응답 처리
+                if response.status_code == 200:
+                    return self._parse_response(response)
+
+                # 오류 처리
+                try:
+                    error_body = response.json()
+                    code = error_body.get("code", str(response.status_code))
+                    message = error_body.get("message", response.text)
+                except ValueError:
+                    code = str(response.status_code)
+                    message = response.text
+
+                raise CoupangWingError(code, message, response.status_code)
+
+            except requests.exceptions.ConnectionError as e:
+                last_error = CoupangWingError("NETWORK_ERROR", f"연결 오류: {e}")
+                if attempt < max_attempts:
+                    delay = self._calculate_retry_delay(attempt)
+                    logger.warning(f"연결 오류, {delay:.1f}초 후 재시도 ({attempt}/{max_attempts}): {e}")
+                    time.sleep(delay)
+                    continue
+                raise last_error
+
+            except requests.exceptions.Timeout as e:
+                last_error = CoupangWingError("TIMEOUT", f"타임아웃: {e}")
+                if attempt < max_attempts:
+                    delay = self._calculate_retry_delay(attempt)
+                    logger.warning(f"타임아웃, {delay:.1f}초 후 재시도 ({attempt}/{max_attempts})")
+                    time.sleep(delay)
+                    continue
+                raise last_error
+
+            except requests.RequestException as e:
+                raise CoupangWingError("NETWORK_ERROR", f"요청 실패: {e}")
+
+        # 모든 재시도 소진
+        if last_error:
+            raise last_error
+        raise CoupangWingError("MAX_RETRIES", "최대 재시도 횟수 초과")
+
+    def _calculate_retry_delay(self, attempt: int) -> float:
+        """지수 백오프 대기 시간 계산"""
+        import random
+        delay = RETRY_BASE_DELAY * (2 ** (attempt - 1))
+        # ±25% 지터 추가
+        jitter = delay * 0.25 * random.uniform(-1, 1)
+        return min(delay + jitter, 30.0)  # 최대 30초
+
+    def _parse_response(self, response: requests.Response) -> Dict[str, Any]:
+        """
+        API 응답 파싱 (중첩 구조 안전 처리)
+
+        Args:
+            response: requests 응답 객체
+
+        Returns:
+            파싱된 JSON 딕셔너리
+        """
         try:
-            error_body = response.json()
-            code = error_body.get("code", str(response.status_code))
-            message = error_body.get("message", response.text)
+            result = response.json()
         except ValueError:
-            code = str(response.status_code)
-            message = response.text
+            return {"data": response.text}
 
-        raise CoupangWingError(code, message, response.status_code)
+        # 쿠팡 API는 HTTP 200에서도 에러를 반환할 수 있음
+        if isinstance(result, dict):
+            code = result.get("code", "")
+            if code == "ERROR":
+                message = result.get("message", "알 수 없는 오류")
+                raise CoupangWingError("API_ERROR", message)
+
+        return result
 
     # ─────────────────────────────────────────────
     # 상품 관리
@@ -236,7 +311,7 @@ class CoupangWingClient:
 
     def update_product(self, seller_product_id: int, product_data: Dict[str, Any]) -> Dict[str, Any]:
         """
-        상품 수정
+        상품 수정 (승인 필요)
 
         Args:
             seller_product_id: 수정할 상품 ID
@@ -248,13 +323,85 @@ class CoupangWingClient:
         path = f"{self.SELLER_PRODUCTS_PATH}/{seller_product_id}"
         return self._request("PUT", path, data=product_data)
 
+    def patch_product(self, seller_product_id: int, product_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        상품 수정 (승인 불필요) - 배송비, 반품비 등 일부 필드만 변경
+
+        Args:
+            seller_product_id: 수정할 상품 ID
+            product_data: 수정 데이터 (변경할 필드만)
+
+        Returns:
+            수정 결과
+        """
+        path = f"{self.SELLER_PRODUCTS_PATH}/{seller_product_id}"
+        return self._request("PATCH", path, data=product_data)
+
+    def delete_product(self, seller_product_id: int) -> Dict[str, Any]:
+        """
+        상품 삭제 (판매중지)
+
+        Args:
+            seller_product_id: 삭제할 상품 ID
+
+        Returns:
+            삭제 결과
+        """
+        path = f"{self.SELLER_PRODUCTS_PATH}/{seller_product_id}"
+        return self._request("DELETE", path)
+
+    def stop_sale(self, seller_product_id: int) -> Dict[str, Any]:
+        """
+        판매 중지 (상품 유지, 판매만 중지)
+
+        Args:
+            seller_product_id: 상품 ID
+
+        Returns:
+            중지 결과
+        """
+        path = f"{self.SELLER_PRODUCTS_PATH}/{seller_product_id}/sales/stop"
+        return self._request("PUT", path)
+
     # ─────────────────────────────────────────────
     # 재고/가격 관리
     # ─────────────────────────────────────────────
 
+    def update_price(self, vendor_item_id: int, new_price: int, force: bool = True) -> Dict[str, Any]:
+        """
+        옵션별 가격 변경
+
+        Args:
+            vendor_item_id: 벤더 아이템 ID
+            new_price: 새 판매가 (10원 단위)
+            force: 가격 변경 비율 제한 해제 (기본 True)
+                   - False: 기존 가격 대비 최대 50% 인하 / 100% 인상까지만 가능
+                   - True: 제한 없이 변경 가능
+
+        Returns:
+            업데이트 결과
+        """
+        path = f"{self.VENDOR_ITEMS_PATH}/{vendor_item_id}/prices/{new_price}"
+        params = {"forceSalePriceUpdate": "true"} if force else None
+        return self._request("PUT", path, params=params)
+
+    def update_quantity(self, vendor_item_id: int, quantity: int) -> Dict[str, Any]:
+        """
+        옵션별 재고 변경
+
+        Args:
+            vendor_item_id: 벤더 아이템 ID
+            quantity: 재고 수량
+
+        Returns:
+            업데이트 결과
+        """
+        path = f"{self.VENDOR_ITEMS_PATH}/{vendor_item_id}/quantities/{quantity}"
+        return self._request("PUT", path)
+
     def update_inventory(self, vendor_item_id: int, quantity: int, price: int) -> Dict[str, Any]:
         """
-        재고/가격 업데이트
+        재고/가격 동시 업데이트 (deprecated - update_price, update_quantity 사용 권장)
 
         Args:
             vendor_item_id: 벤더 아이템 ID
@@ -264,12 +411,10 @@ class CoupangWingClient:
         Returns:
             업데이트 결과
         """
-        path = f"{self.VENDOR_ITEMS_PATH}/{vendor_item_id}/inventories"
-        data = {
-            "inventoryQuantity": quantity,
-            "sellingPrice": price,
-        }
-        return self._request("PUT", path, data=data)
+        # 가격 먼저, 재고 다음
+        price_result = self.update_price(vendor_item_id, price)
+        quantity_result = self.update_quantity(vendor_item_id, quantity)
+        return {"price": price_result, "quantity": quantity_result}
 
     # ─────────────────────────────────────────────
     # 카테고리

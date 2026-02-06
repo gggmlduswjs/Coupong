@@ -13,6 +13,7 @@ FREE_SHIPPING_THRESHOLD = 2000  # 무료배송 순마진 기준 (원)
 # 재고
 DEFAULT_STOCK = 10  # 기본 재고 수량
 DEFAULT_LEAD_TIME = 2  # 출고 소요일
+LOW_STOCK_THRESHOLD = 3  # 재고 부족 기준 (이하면 리필)
 
 # API
 API_THROTTLE_SECONDS = 1.0  # 알라딘 API 호출 간격 (초)
@@ -21,13 +22,12 @@ COUPANG_WING_RATE_LIMIT = 0.1  # WING API 호출 간격 (초, 10 calls/sec)
 # 쿠팡 WING API - 도서 상품 등록 기본값 (PDF 가이드 기반)
 BOOK_PRODUCT_DEFAULTS = {
     "deliveryMethod": "SEQUENCIAL",              # 일반배송
-    "deliveryChargeType": "FREE",                # 무료배송 기본 (마진에 따라 변경)
-    "deliveryCharge": 0,
+    "deliveryChargeType": "NOT_FREE",            # 유료배송 기본 (2026-02-06 변경)
+    "deliveryCharge": 2500,                       # 배송비 2,500원
     "freeShipOverAmount": 0,
     "deliveryChargeOnReturn": 2500,
     "unionDeliveryType": "UNION_DELIVERY",
     "remoteAreaDeliverable": "N",
-    "returnChargeVendor": "N",
     "returnCharge": 2500,
     "requested": True,                           # 자동 판매승인 요청
     "adultOnly": "EVERYONE",
@@ -61,4 +61,43 @@ WING_ACCOUNT_ENV_MAP = {
     "007-ez":   "COUPANG_007EZ",
     "002-bm":   "COUPANG_002BM",
     "big6ceo":  "COUPANG_BIG6CEO",
+}
+
+# ─────────────────────────────────────────────
+# 동기화 설정 (sync 스크립트 공통)
+# ─────────────────────────────────────────────
+SYNC_CONFIG = {
+    "batch_size": 50,           # 배치 커밋 단위
+    "retry_max_attempts": 3,    # API 재시도 횟수
+    "retry_base_delay": 1.0,    # 재시도 기본 대기 (초)
+    "stale_hours": 24,          # 상세 재조회 기준 시간
+}
+
+# ─────────────────────────────────────────────
+# 타임아웃 설정
+# ─────────────────────────────────────────────
+TIMEOUT_CONFIG = {
+    "api_request": 30,          # API 요청 타임아웃 (초)
+    "db_busy": 30000,           # SQLite busy 타임아웃 (ms)
+    "db_connect": 30,           # DB 연결 타임아웃 (초)
+}
+
+# ─────────────────────────────────────────────
+# 자동 크롤링 설정
+# ─────────────────────────────────────────────
+AUTO_CRAWL_CONFIG = {
+    "crawl_hour": 3,            # 실행 시각 (새벽 3시)
+    "max_per_publisher": 50,    # 출판사당 최대 검색 수
+    "year_filter": 2025,        # 검색 연도 필터
+    "check_interval": 30,       # 스케줄 체크 간격 (초)
+    "max_items_safety": 200,    # 1회 최대 처리 아이템
+}
+
+# ─────────────────────────────────────────────
+# 가격/마진 설정
+# ─────────────────────────────────────────────
+PRICE_CONFIG = {
+    "min_margin": 1000,         # 최소 마진 (원)
+    "min_margin_rate": 0.05,    # 최소 마진율 (5%)
+    "bundle_threshold": 2000,   # 묶음 판매 기준 마진 (원)
 }

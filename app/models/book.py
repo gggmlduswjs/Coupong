@@ -59,8 +59,13 @@ class Book(Base):
             "2025 수능완성 국어영역" → 2025
             "개념원리 수학(상) 2024" → 2024
             "EBS 고등 예비과정 24년도" → 2024
+            "고2 수학" → None (학년은 연도가 아님)
+
+        주의:
+            - "2학년", "3학년" 등 학년 표현은 연도로 인식하지 않음
+            - 2자리 연도는 명시적 연도 표현("년", "학년도", 아포스트로피)만 인식
         """
-        # 4자리 연도 패턴 (2020~2030)
+        # 1순위: 4자리 연도 패턴 (2020~2030)
         patterns = [
             r'(202[0-9])',  # 2020~2029
             r'(203[0])',    # 2030
@@ -71,11 +76,22 @@ class Book(Base):
             if match:
                 return int(match.group(1))
 
-        # 2자리 연도 패턴 (24 → 2024)
-        match = re.search(r'[^\d]([2][0-9])(?:년|학년도)?', title)
-        if match:
-            year_suffix = int(match.group(1))
-            return 2000 + year_suffix
+        # 2순위: 2자리 연도 + 명시적 접미사 (24년도, 24학년도, '24 등)
+        # "2학년", "3학년" 등 학년 표현 제외를 위해 20~30만 매칭
+        explicit_year_patterns = [
+            r"'([2][0-9])\b",           # '24, '25 형태
+            r"\b([2][0-9])년도\b",       # 24년도, 25년도
+            r"\b([2][0-9])학년도\b",     # 24학년도
+            r"\b([2][0-9])년\b",         # 24년 (단, 학년 앞은 제외)
+        ]
+
+        for pattern in explicit_year_patterns:
+            match = re.search(pattern, title)
+            if match:
+                year_suffix = int(match.group(1))
+                # 20~30 범위만 유효 (2020~2030)
+                if 20 <= year_suffix <= 30:
+                    return 2000 + year_suffix
 
         return None
 

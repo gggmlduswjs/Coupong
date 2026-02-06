@@ -50,6 +50,9 @@ YEAR_FILTER = 2025       # 2025년 이후 도서만
 CHECK_INTERVAL = 30      # 시간 체크 간격 (초)
 DB_TIMEOUT = 30          # SQLite timeout (대시보드 동시 접근 대비)
 
+# 안전장치 - CLI에서 재정의 가능
+MAX_ITEMS_SAFETY = 200   # 1회 실행당 최대 처리 아이템 (0=무제한)
+
 
 def log_to_obsidian(message: str, title: str = "자동 크롤링"):
     """Obsidian daily note에 결과 기록"""
@@ -99,7 +102,7 @@ def run_crawl():
 
     try:
         # Step 1: 출판사별 키워드 검색 크롤링
-        logger.info("[1/4] 출판사별 크롤링 (year_filter=%d, max=%d/출판사)", YEAR_FILTER, MAX_PER_PUBLISHER)
+        logger.info("[1/5] 출판사별 크롤링 (year_filter=%d, max=%d/출판사)", YEAR_FILTER, MAX_PER_PUBLISHER)
         crawl_result = sync.crawl_by_publisher(
             max_per_publisher=MAX_PER_PUBLISHER,
             year_filter=YEAR_FILTER,
@@ -110,7 +113,7 @@ def run_crawl():
         )
 
         # Step 2: 마진 분석 + Product 생성
-        logger.info("[2/4] 마진 분석...")
+        logger.info("[2/5] 마진 분석...")
         analyze_result = sync.analyze_products(crawl_result["books"])
         logger.info(
             "분석 결과: %d개 Product 생성, 묶음필요 %d개",
@@ -118,40 +121,35 @@ def run_crawl():
         )
 
         # Step 3: 갭 분석 (계정별 미등록 도서)
-        logger.info("[3/4] 갭 분석...")
+        logger.info("[3/5] 갭 분석...")
         gaps = sync.find_gaps()
         total_missing = sum(g["missing"] for g in gaps.values())
         logger.info("갭 분석: %d개 계정, 총 미등록 %d개", len(gaps), total_missing)
 
-        # Step 4: 계정별 자동 등록
+        # Step 4: 자동 등록 비활성화 (2026-02-06)
+        # ⚠️ 자동 업로드 기능 제거 - 수동 검토 후 등록 필요
         upload_results = {}
-        if total_missing > 0:
-            logger.info("[4/4] 계정별 자동 등록...")
-            for acc_name, gap_info in gaps.items():
-                if not gap_info["products"]:
-                    upload_results[acc_name] = {"success": 0, "failed": 0, "skipped": True}
-                    continue
+        total_uploaded = 0
+        total_failed = 0
+        logger.info("[4/5] 자동 등록 비활성화됨 — 수동 검토 필요 (미등록 %d개)", total_missing)
 
-                logger.info("  %s: 미등록 %d개 등록 시작", acc_name, len(gap_info["products"]))
-                try:
-                    result = sync.upload_to_account(
-                        account=gap_info["account"],
-                        products=gap_info["products"],
-                        dry_run=False,
-                    )
-                    upload_results[acc_name] = {
-                        "success": result["success"],
-                        "failed": result["failed"],
-                    }
-                    logger.info("  %s: 성공 %d, 실패 %d", acc_name, result["success"], result["failed"])
-                except Exception as upload_err:
-                    logger.error("  %s: 등록 실패 — %s", acc_name, upload_err)
-                    upload_results[acc_name] = {"success": 0, "failed": len(gap_info["products"]), "error": str(upload_err)}
-        else:
-            logger.info("[4/4] 미등록 도서 없음 — 등록 스킵")
-
-        total_uploaded = sum(r.get("success", 0) for r in upload_results.values())
-        total_failed = sum(r.get("failed", 0) for r in upload_results.values())
+        # Step 5: 가격/재고 동기화
+        inv_result = {"price_updated": 0, "stock_refilled": 0, "errors": 0}
+        try:
+            from scripts.sync_inventory import InventorySync
+            logger.info("[5/5] 가격/재고 동기화...")
+            inv_syncer = InventorySync(db_path=str(project_root / "coupang_auto.db"))
+            inv_results = inv_syncer.sync_all()
+            inv_result["price_updated"] = sum(r["price_updated"] for r in inv_results)
+            inv_result["stock_refilled"] = sum(r["stock_refilled"] for r in inv_results)
+            inv_result["errors"] = sum(r["errors"] for r in inv_results)
+            logger.info(
+                "재고동기화: 가격변경 %d개, 재고리필 %d개, 오류 %d개",
+                inv_result["price_updated"], inv_result["stock_refilled"], inv_result["errors"]
+            )
+        except Exception as inv_err:
+            logger.error("재고동기화 실패: %s", inv_err)
+            inv_result["errors"] = -1
 
         elapsed = (datetime.now() - start_time).total_seconds()
         logger.info("완료! 소요시간: %.1f초", elapsed)
@@ -163,6 +161,7 @@ def run_crawl():
             f"- **Product 생성**: {analyze_result['created']}개",
             f"- **미등록 갭**: {total_missing}개",
             f"- **쿠팡 등록**: 성공 {total_uploaded}개 / 실패 {total_failed}개",
+            f"- **재고동기화**: 가격변경 {inv_result['price_updated']}개, 재고리필 {inv_result['stock_refilled']}개",
         ]
         # 계정별 상세
         for acc_name, r in upload_results.items():
@@ -180,6 +179,8 @@ def run_crawl():
             "gaps": total_missing,
             "uploaded": total_uploaded,
             "upload_failed": total_failed,
+            "price_updated": inv_result["price_updated"],
+            "stock_refilled": inv_result["stock_refilled"],
             "elapsed": elapsed,
         }
 
@@ -231,7 +232,23 @@ def main():
     parser = argparse.ArgumentParser(description="자동 크롤링 스케줄러")
     parser.add_argument("--now", action="store_true", help="즉시 실행 (테스트용)")
     parser.add_argument("--hour", type=int, default=CRAWL_HOUR, help=f"실행 시각 (기본: {CRAWL_HOUR}시)")
+    parser.add_argument("--confirm", action="store_true", help="안전장치: 실행 전 확인 (데몬 모드용)")
+    parser.add_argument("--max-items", type=int, default=MAX_ITEMS_SAFETY,
+                        help=f"1회 최대 처리 아이템 (기본: {MAX_ITEMS_SAFETY}, 0=무제한)")
     args = parser.parse_args()
+
+    # 안전장치: --confirm 없이 데몬 모드 실행 시 경고
+    if not args.now and not args.confirm:
+        logger.warning("=" * 60)
+        logger.warning("⚠️  안전장치: --confirm 플래그 없이 데몬 모드를 실행합니다.")
+        logger.warning("   자동 크롤링이 매일 실행되며, 데이터가 변경될 수 있습니다.")
+        logger.warning("   5초 후 시작됩니다. Ctrl+C로 취소...")
+        logger.warning("=" * 60)
+        try:
+            time.sleep(5)
+        except KeyboardInterrupt:
+            logger.info("사용자에 의해 취소됨")
+            sys.exit(0)
 
     if args.now:
         logger.info("즉시 실행 모드")
@@ -243,6 +260,7 @@ def main():
             print(f"  Product 생성: {result['new_products']}개")
             print(f"  미등록 갭: {result['gaps']}개")
             print(f"  쿠팡 등록: 성공 {result['uploaded']}개 / 실패 {result['upload_failed']}개")
+            print(f"  가격변경: {result.get('price_updated', 0)}개 / 재고리필: {result.get('stock_refilled', 0)}개")
             print(f"  소요시간: {result['elapsed']:.1f}초")
         else:
             print(f"\n크롤링 실패: {result['error']}")

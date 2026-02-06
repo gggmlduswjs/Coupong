@@ -28,6 +28,7 @@ load_dotenv(ROOT / ".env")
 
 from app.api.coupang_wing_client import CoupangWingClient, CoupangWingError
 from app.constants import WING_ACCOUNT_ENV_MAP
+from app.services.wing_sync_base import get_accounts, create_wing_client
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -88,38 +89,12 @@ class SettlementSync:
         logger.info("settlement_history 테이블 확인 완료")
 
     def _get_accounts(self, account_name: str = None) -> list:
-        """WING API 활성화된 계정 목록 조회"""
-        sql = """
-            SELECT id, account_name, vendor_id, wing_access_key, wing_secret_key
-            FROM accounts
-            WHERE is_active = 1 AND wing_api_enabled = 1
-                  AND vendor_id IS NOT NULL
-                  AND wing_access_key IS NOT NULL
-                  AND wing_secret_key IS NOT NULL
-        """
-        if account_name:
-            sql += f" AND account_name = '{account_name}'"
-        sql += " ORDER BY account_name"
-
-        with self.engine.connect() as conn:
-            rows = conn.execute(text(sql)).mappings().all()
-        return [dict(r) for r in rows]
+        """WING API 활성화된 계정 목록 조회 (SQL 인젝션 방지)"""
+        return get_accounts(self.engine, account_name)
 
     def _create_client(self, account: dict) -> CoupangWingClient:
         """계정 정보로 WING 클라이언트 생성"""
-        name = account["account_name"]
-        env_prefix = WING_ACCOUNT_ENV_MAP.get(name, "")
-
-        vendor_id = account.get("vendor_id") or ""
-        access_key = account.get("wing_access_key") or ""
-        secret_key = account.get("wing_secret_key") or ""
-
-        if not access_key and env_prefix:
-            vendor_id = os.getenv(f"{env_prefix}_VENDOR_ID", vendor_id)
-            access_key = os.getenv(f"{env_prefix}_ACCESS_KEY", "")
-            secret_key = os.getenv(f"{env_prefix}_SECRET_KEY", "")
-
-        return CoupangWingClient(vendor_id, access_key, secret_key)
+        return create_wing_client(account)
 
     @staticmethod
     def _generate_month_list(months_back: int) -> List[str]:
