@@ -21,7 +21,11 @@ from typing import Dict, Any, List, Optional
 import re
 
 from app.api.coupang_wing_client import CoupangWingClient, CoupangWingError
-from app.constants import BOOK_PRODUCT_DEFAULTS, BOOK_CATEGORY_CODE
+from app.constants import (
+    BOOK_PRODUCT_DEFAULTS, BOOK_CATEGORY_CODE,
+    DEFAULT_STOCK,
+    determine_delivery_charge_type,
+)
 
 # 캐시 디렉토리
 CACHE_DIR = Path(__file__).parent.parent / "cache"
@@ -186,13 +190,10 @@ class CoupangAPIUploader:
         # 반품 정보
         ret = return_info or DEFAULT_RETURN_INFO
 
-        # 배송비 설정
-        if shipping_policy == "free":
-            delivery_charge_type = "FREE"
-            delivery_charge = 0
-        else:
-            delivery_charge_type = "NOT_FREE"
-            delivery_charge = 2500
+        # 배송비 설정 — 공급률 + 정가 기반 동적 결정
+        margin_rate = int(product_data.get("margin_rate", 65))
+        delivery_charge_type, delivery_charge, free_ship_over_amount = \
+            determine_delivery_charge_type(margin_rate, list_price)
 
         # 판매 시작일
         sale_started = datetime.now().strftime("%Y-%m-%dT00:00:00")
@@ -200,8 +201,8 @@ class CoupangAPIUploader:
         # 상품고시정보 (서적)
         notices = _build_book_notices(title, author, publisher)
 
-        # 필수 속성 (attributes)
-        attributes = _build_book_attributes(isbn, publisher, author)
+        # 필수 속성 + 검색필터 속성
+        attributes = _build_book_attributes(isbn, publisher, author, title)
 
         # 검색 키워드
         search_tags = self._generate_search_tags(product_data)
@@ -232,7 +233,7 @@ class CoupangAPIUploader:
             "deliveryCompanyCode": "HANJIN",
             "deliveryChargeType": delivery_charge_type,
             "deliveryCharge": delivery_charge,
-            "freeShipOverAmount": BOOK_PRODUCT_DEFAULTS["freeShipOverAmount"],
+            "freeShipOverAmount": free_ship_over_amount,
             "deliveryChargeOnReturn": BOOK_PRODUCT_DEFAULTS["deliveryChargeOnReturn"],
             "remoteAreaDeliverable": BOOK_PRODUCT_DEFAULTS["remoteAreaDeliverable"],
             "unionDeliveryType": BOOK_PRODUCT_DEFAULTS["unionDeliveryType"],
@@ -257,6 +258,7 @@ class CoupangAPIUploader:
                     "maximumBuyForPerson": 0,
                     "maximumBuyForPersonPeriod": 1,
                     "outboundShippingTimeDay": BOOK_PRODUCT_DEFAULTS["outboundShippingTimeDay"],
+                    "inventoryCount": DEFAULT_STOCK,
                     "unitCount": 1,
                     "adultOnly": BOOK_PRODUCT_DEFAULTS["adultOnly"],
                     "taxType": BOOK_PRODUCT_DEFAULTS["taxType"],
@@ -267,7 +269,7 @@ class CoupangAPIUploader:
                     "barcode": isbn if _VALID_BARCODE_RE.match(isbn) else "",
                     "emptyBarcode": not _VALID_BARCODE_RE.match(isbn),
                     "emptyBarcodeReason": "" if _VALID_BARCODE_RE.match(isbn) else "도서 바코드 없음",
-                    "modelNo": "",
+                    "modelNo": isbn or "",
                     "externalVendorSku": isbn,
                     "searchTags": search_tags,
                     "images": images,
@@ -296,9 +298,10 @@ class CoupangAPIUploader:
 
         return payload
 
-    def upload_product(self, product_data: Dict, outbound_code: str, return_code: str) -> Dict[str, Any]:
+    def upload_product(self, product_data: Dict, outbound_code: str, return_code: str,
+                       dashboard_override: bool = False) -> Dict[str, Any]:
         """
-        단일 상품 API 등록
+        단일 상품 API 등록 (REGISTER_LOCK 안전장치 적용)
 
         Returns:
             {"success": bool, "seller_product_id": str, "message": str}
@@ -307,7 +310,7 @@ class CoupangAPIUploader:
         product_name = product_data.get("product_name", "")
 
         try:
-            result = self.client.create_product(payload)
+            result = self.client.create_product(payload, dashboard_override=dashboard_override)
 
             # 쿠팡은 200 응답이지만 body에 에러를 담아 보내는 경우가 있음
             code = result.get("code", "")
@@ -535,19 +538,147 @@ def _build_book_notices(title: str, author: str, publisher: str) -> List[Dict]:
     ]
 
 
-def _build_book_attributes(isbn: str, publisher: str = "", author: str = "") -> List[Dict]:
+def _parse_subject(title: str) -> str:
+    """제목에서 학습과목 추출"""
+    # 우선순위 순 (구체적 → 일반적)
+    subject_map = [
+        ("미적분", "수학"), ("확률과통계", "수학"), ("확률과 통계", "수학"),
+        ("기하", "수학"), ("대수", "수학"),
+        ("생명과학", "과학"), ("지구과학", "과학"), ("물리학", "과학"),
+        ("물리", "과학"), ("화학", "과학"), ("생물", "과학"),
+        ("한국사", "역사"), ("세계사", "역사"), ("동아시아사", "역사"),
+        ("한국지리", "사회"), ("세계지리", "사회"),
+        ("경제", "사회"), ("정치와법", "사회"), ("윤리와사상", "사회"),
+        ("생활과윤리", "사회"), ("사회문화", "사회"), ("사회·문화", "사회"),
+        ("수학", "수학"), ("국어", "국어"), ("영어", "영어"),
+        ("과학", "과학"), ("사회", "사회"), ("역사", "역사"),
+        ("독서", "국어"), ("문학", "국어"), ("문법", "국어"),
+        ("독해", "영어"), ("리딩", "영어"), ("Reading", "영어"),
+        ("파닉스", "영어"), ("phonics", "영어"), ("Phonics", "영어"),
+    ]
+    for keyword, subject in subject_map:
+        if keyword in title:
+            return subject
+    return ""
+
+
+def _parse_grade(title: str) -> str:
+    """제목에서 사용학년/단계 추출 (쿠팡 옵션값 형식)"""
+    import re as _re
+    # 초등 N-M 패턴
+    m = _re.search(r'초등\s*(\d)[- .](\d)', title)
+    if m:
+        return f"초등 {m.group(1)}-{m.group(2)}"
+    m = _re.search(r'초등\s*(\d)학년', title)
+    if m:
+        return f"초등 {m.group(1)}"
+    m = _re.search(r'초(\d)[- .](\d)', title)
+    if m:
+        return f"초등 {m.group(1)}-{m.group(2)}"
+    # 중등
+    m = _re.search(r'중(?:등|학)?\s*(\d)[- .](\d)', title)
+    if m:
+        return f"중등 {m.group(1)}-{m.group(2)}"
+    m = _re.search(r'중(?:등|학)?\s*(\d)학년', title)
+    if m:
+        return f"중등 {m.group(1)}"
+    m = _re.search(r'중(\d)[- .](\d)', title)
+    if m:
+        return f"중등 {m.group(1)}-{m.group(2)}"
+    # 고등
+    m = _re.search(r'고(?:등)?\s*(\d)[- .](\d)', title)
+    if m:
+        return f"고등 {m.group(1)}-{m.group(2)}"
+    m = _re.search(r'고(\d)', title)
+    if m:
+        return f"고등 {m.group(1)}"
+    # 수능/예비
+    if "수능" in title:
+        return "수능"
+    if "예비 초등" in title or "예비초등" in title:
+        return "예비 초등"
+    if "예비 중" in title or "예비중" in title:
+        return "예비 중등"
+    # 일반 학교급
+    if "초등" in title:
+        return "초등"
+    if "중등" in title or "중학" in title:
+        return "중등"
+    if "고등" in title or "고교" in title:
+        return "고등"
+    return ""
+
+
+def _parse_series_name(title: str, publisher: str) -> str:
+    """제목에서 시리즈명 추출 (출판사명 제거 후 학년/과목 이전 부분)"""
+    import re as _re
+    # 출판사명이 제목 앞에 있으면 제거
+    t = title
+    if publisher and t.startswith(publisher):
+        t = t[len(publisher):].strip()
+    # 학년 패턴 앞 부분 = 시리즈명
+    m = _re.search(r'(초등|중등|중학|고등|고\d|초\d|중\d|수능)', t)
+    if m and m.start() > 1:
+        series = t[:m.start()].strip().rstrip('-').strip()
+        if len(series) >= 2:
+            return series[:50]
+    return ""
+
+
+def _parse_semester(title: str) -> str:
+    """제목에서 학기구분 추출"""
+    import re as _re
+    m = _re.search(r'(\d)[- .]([12])\b', title)
+    if m:
+        return f"{m.group(2)}학기"
+    if "1학기" in title:
+        return "1학기"
+    if "2학기" in title:
+        return "2학기"
+    return ""
+
+
+def _build_book_attributes(isbn: str, publisher: str = "", author: str = "",
+                           title: str = "") -> List[Dict]:
     """
-    도서 필수 속성 생성
+    도서 필수 속성 + 검색필터 속성 자동 생성
 
     필수: 학습과목, 사용학년/단계, ISBN
+    검색필터: 시리즈명, 사용연도, 학기구분, 도서세트여부, 도서형태, 발행언어
     """
-    return [
-        {"attributeTypeName": "학습과목", "attributeValueName": "상세내용 참조"},
-        {"attributeTypeName": "사용학년/단계", "attributeValueName": "상세내용 참조"},
+    import re as _re
+
+    # 자동 파싱
+    subject = _parse_subject(title)
+    grade = _parse_grade(title)
+    series = _parse_series_name(title, publisher)
+    semester = _parse_semester(title)
+
+    # 사용연도 추출
+    year_match = _re.search(r'(20[2-3]\d)', title)
+    use_year = year_match.group(1) if year_match else ""
+
+    attrs = [
+        {"attributeTypeName": "학습과목", "attributeValueName": subject or "상세내용 참조"},
+        {"attributeTypeName": "사용학년/단계", "attributeValueName": grade or "상세내용 참조"},
         {"attributeTypeName": "ISBN", "attributeValueName": isbn or "상세내용 참조"},
         {"attributeTypeName": "저자", "attributeValueName": author or "상세내용 참조"},
         {"attributeTypeName": "출판사", "attributeValueName": publisher or "상세내용 참조"},
     ]
+
+    # 검색필터 속성 (값이 있을 때만 추가)
+    if series:
+        attrs.append({"attributeTypeName": "시리즈명", "attributeValueName": series})
+    if use_year:
+        attrs.append({"attributeTypeName": "사용연도", "attributeValueName": use_year})
+    if semester:
+        attrs.append({"attributeTypeName": "학기구분", "attributeValueName": semester})
+    attrs.append({"attributeTypeName": "도서 세트여부", "attributeValueName": "아니오"})
+    attrs.append({"attributeTypeName": "도서형태", "attributeValueName": "종이책"})
+    attrs.append({"attributeTypeName": "발행언어", "attributeValueName": "한국어"})
+    attrs.append({"attributeTypeName": "e북 포함 여부", "attributeValueName": "아니오"})
+
+    return attrs
 
 
 def _build_content_html(title: str, author: str, publisher: str, description: str, image_url: str) -> str:

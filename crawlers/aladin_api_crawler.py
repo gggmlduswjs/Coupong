@@ -81,6 +81,7 @@ class AladinAPICrawler:
                     "Sort": sort,
                     "Start": start,
                     "MaxResults": min(max_per_page, max_results - len(products)),
+                    "Cover": "Big",
                     "output": "js",
                     "Version": "20131101"
                 }
@@ -167,6 +168,7 @@ class AladinAPICrawler:
                     "SearchTarget": "Book",
                     "Start": start,
                     "MaxResults": min(max_per_page, max_results - len(all_items)),
+                    "Cover": "Big",
                     "output": "js",
                     "Version": "20131101",
                 }
@@ -273,6 +275,7 @@ class AladinAPICrawler:
                 "ttbkey": self.ttb_key,
                 "itemIdType": "ISBN",
                 "ItemId": isbn,
+                "Cover": "Big",
                 "output": "js",
                 "Version": "20131101"
             }
@@ -354,6 +357,7 @@ class AladinAPICrawler:
 
                 # 추가 정보
                 "page_count": item.get("subInfo", {}).get("itemPage", 0) if isinstance(item.get("subInfo"), dict) else 0,
+                "sales_point": item.get("salesPoint", 0),
             }
 
             # 로그에 연도 정보 포함

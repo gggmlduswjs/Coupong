@@ -31,10 +31,11 @@ from app.models.book import Book
 from app.models.product import Product
 from app.models.account import Account
 from app.models.listing import Listing
-from app.constants import WING_ACCOUNT_ENV_MAP
+from app.constants import WING_ACCOUNT_ENV_MAP, CRAWL_MIN_PRICE, CRAWL_EXCLUDE_KEYWORDS
 from crawlers.aladin_api_crawler import AladinAPICrawler
 from app.api.coupang_wing_client import CoupangWingClient
 from uploaders.coupang_api_uploader import CoupangAPIUploader
+from app.services.db_migration import SQLiteMigrator
 
 logging.basicConfig(
     level=logging.INFO,
@@ -51,6 +52,9 @@ class FranchiseSync:
         self.db = db or SessionLocal()
         self._owns_db = db is None
         self.ttb_key = os.getenv("ALADIN_TTB_KEY", "")
+        # DB 마이그레이션: sales_point 컬럼 추가
+        migrator = SQLiteMigrator(engine)
+        migrator.add_columns_if_missing("books", {"sales_point": "INTEGER DEFAULT 0"})
 
     def close(self):
         if self._owns_db:
@@ -103,6 +107,13 @@ class FranchiseSync:
         skipped = 0
         seen_isbns = set()  # 배치 내 중복 방지
 
+        # ISBN 프리로드: DB 전체 ISBN + sales_point를 메모리에 로드
+        existing_isbn_sp = {
+            isbn: sp for isbn, sp in
+            self.db.query(Book.isbn, Book.sales_point).all()
+        }
+        sp_updates = {}  # {isbn: new_sales_point} 배치 업데이트용
+
         total = len(results)
         for i, item in enumerate(results):
             isbn = item.get("isbn", "")
@@ -116,9 +127,12 @@ class FranchiseSync:
                 continue
             seen_isbns.add(isbn)
 
-            # DB 중복 체크
-            existing = self.db.query(Book).filter(Book.isbn == isbn).first()
-            if existing:
+            # DB 중복 체크 (프리로드된 딕셔너리에서 O(1) 조회)
+            if isbn in existing_isbn_sp:
+                # 기존 책의 salesPoint 갱신 (배치로 모아서 처리)
+                new_sp = item.get("sales_point", 0) or 0
+                if new_sp and new_sp != (existing_isbn_sp[isbn] or 0):
+                    sp_updates[isbn] = new_sp
                 skipped += 1
                 continue
 
@@ -151,6 +165,7 @@ class FranchiseSync:
                 source_url=item.get("kyobo_url", ""),
                 publish_date=item.get("publish_date"),
                 page_count=item.get("page_count", 0),
+                sales_point=item.get("sales_point", 0),
                 is_processed=False,
                 crawled_at=datetime.utcnow(),
             )
@@ -161,6 +176,12 @@ class FranchiseSync:
 
             if progress_callback and total > 0:
                 progress_callback(i + 1, total, f"저장 중: {item['title'][:30]}...")
+
+        # 기존 책 sales_point 배치 업데이트
+        if sp_updates:
+            for book in self.db.query(Book).filter(Book.isbn.in_(list(sp_updates.keys()))):
+                book.sales_point = sp_updates[book.isbn]
+            logger.info(f"기존 도서 salesPoint 갱신: {len(sp_updates)}개")
 
         self.db.commit()
 
@@ -221,6 +242,13 @@ class FranchiseSync:
         total_skipped = 0
         seen_isbns = set()
 
+        # ISBN 프리로드: DB 전체 ISBN + sales_point를 메모리에 로드
+        existing_isbn_sp = {
+            isbn: sp for isbn, sp in
+            self.db.query(Book.isbn, Book.sales_point).all()
+        }
+        sp_updates = {}  # {isbn: new_sales_point} 배치 업데이트용
+
         for idx, pub_name in enumerate(target_names):
             publisher = pub_map[pub_name]
 
@@ -230,19 +258,48 @@ class FranchiseSync:
             # 원래 이름 + 별칭으로 검색 (씨톡→씨앤톡 등)
             search_names = AladinAPICrawler.get_search_names(pub_name)
             results = []
+            seen_isbn_batch = set()  # 정렬 간 중복 제거용
             for sname in search_names:
+                # 최신순 크롤링
                 batch = crawler.search_by_keyword(
                     sname, max_results=max_per_publisher,
                     sort="PublishTime", year_filter=year_filter,
                 )
-                results.extend(batch)
-                if len(search_names) > 1:
-                    time.sleep(0.5)  # 별칭 검색 간 딜레이
+                for b in batch:
+                    if b.get("isbn") and b["isbn"] not in seen_isbn_batch:
+                        seen_isbn_batch.add(b["isbn"])
+                        results.append(b)
+                time.sleep(0.5)
+
+                # 판매량순 크롤링 (잘 팔리는 책 우선 수집)
+                batch_sp = crawler.search_by_keyword(
+                    sname, max_results=max_per_publisher,
+                    sort="SalesPoint", year_filter=year_filter,
+                )
+                for b in batch_sp:
+                    if b.get("isbn") and b["isbn"] not in seen_isbn_batch:
+                        seen_isbn_batch.add(b["isbn"])
+                        results.append(b)
+                time.sleep(0.5)
             total_searched += len(results)
 
             for item in results:
                 # 출판사 매칭
                 if not AladinAPICrawler._match_publisher_name(item.get("publisher", ""), pub_name):
+                    continue
+
+                # 정가 최소 기준 필터
+                item_price = item.get("original_price", 0) or 0
+                if item_price < CRAWL_MIN_PRICE:
+                    total_skipped += 1
+                    continue
+
+                # 제외 키워드 필터 (제목 + 카테고리)
+                item_title = item.get("title", "")
+                item_category = item.get("category", "")
+                _check_text = item_title + " " + item_category
+                if any(kw in _check_text for kw in CRAWL_EXCLUDE_KEYWORDS):
+                    total_skipped += 1
                     continue
 
                 isbn = item.get("isbn", "")
@@ -256,9 +313,13 @@ class FranchiseSync:
                     continue
                 seen_isbns.add(isbn)
 
-                # DB 중복
-                existing = self.db.query(Book).filter(Book.isbn == isbn).first()
-                if existing:
+                # DB 중복 (프리로드된 딕셔너리에서 O(1) 조회)
+                if isbn in existing_isbn_sp:
+                    # 기존 책의 salesPoint 갱신 (배치로 모아서 처리)
+                    new_sp = item.get("sales_point", 0) or 0
+                    if new_sp and new_sp != (existing_isbn_sp[isbn] or 0):
+                        sp_updates[isbn] = new_sp
+                        existing_isbn_sp[isbn] = new_sp  # 딕셔너리도 갱신
                     total_skipped += 1
                     continue
 
@@ -279,12 +340,22 @@ class FranchiseSync:
                     source_url=item.get("kyobo_url", ""),
                     publish_date=item.get("publish_date"),
                     page_count=item.get("page_count", 0),
+                    sales_point=item.get("sales_point", 0),
                     is_processed=False,
                     crawled_at=datetime.utcnow(),
                 )
                 book.process_metadata()
                 self.db.add(book)
                 all_new_books.append(book)
+                existing_isbn_sp[isbn] = item.get("sales_point", 0)  # 프리로드 딕셔너리에 추가
+
+            # 기존 책 sales_point 배치 업데이트
+            if sp_updates:
+                for book in self.db.query(Book).filter(Book.isbn.in_(list(sp_updates.keys()))):
+                    if book.isbn in sp_updates:
+                        book.sales_point = sp_updates[book.isbn]
+                logger.info(f"기존 도서 salesPoint 갱신: {len(sp_updates)}개")
+                sp_updates.clear()
 
             self.db.commit()
             time.sleep(1)  # API 부하 방지

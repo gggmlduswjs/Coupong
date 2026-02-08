@@ -12,6 +12,8 @@ from app.models.revenue_history import RevenueHistory
 from app.models.settlement_history import SettlementHistory
 from app.models.ad_spend import AdSpend
 from app.models.order import Order
+from app.models.return_request import ReturnRequest
+from app.models.ad_performance import AdPerformance
 
 __all__ = [
     "Account",
@@ -26,5 +28,7 @@ __all__ = [
     "RevenueHistory",
     "SettlementHistory",
     "AdSpend",
+    "AdPerformance",
     "Order",
+    "ReturnRequest",
 ]

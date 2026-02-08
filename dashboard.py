@@ -21,7 +21,12 @@ sys.path.insert(0, str(ROOT))
 
 from app.api.coupang_wing_client import CoupangWingClient, CoupangWingError
 from uploaders.coupang_api_uploader import CoupangAPIUploader, _build_book_notices, _build_book_attributes
-from app.constants import WING_ACCOUNT_ENV_MAP, BOOK_CATEGORY_MAP, BOOK_DISCOUNT_RATE, COUPANG_FEE_RATE, DEFAULT_SHIPPING_COST, FREE_SHIPPING_THRESHOLD
+from app.constants import (
+    WING_ACCOUNT_ENV_MAP, BOOK_CATEGORY_MAP, BOOK_DISCOUNT_RATE,
+    COUPANG_FEE_RATE, DEFAULT_SHIPPING_COST, FREE_SHIPPING_THRESHOLD,
+    determine_customer_shipping_fee,
+)
+from config.publishers import get_publisher_info
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -95,6 +100,7 @@ def create_wing_client(account_row):
 
 
 def product_to_upload_data(row):
+    sr = float(row.get("supply_rate", 0.65) or 0.65)
     return {
         "product_name": row.get("title", ""),
         "publisher": row.get("publisher_name", ""),
@@ -105,6 +111,7 @@ def product_to_upload_data(row):
         "main_image_url": row.get("image_url", "") or "",
         "description": row.get("description", "") or "",
         "shipping_policy": row.get("shipping_policy", "free"),
+        "margin_rate": int(round(sr * 100)),
     }
 
 
@@ -128,7 +135,7 @@ if selected_account_name and not accounts_df.empty:
         selected_account = accounts_df[mask].iloc[0]
 
 st.sidebar.divider()
-page = st.sidebar.radio("메뉴", ["매출", "트렌드", "정산", "광고", "주문", "상품 관리", "신규 등록", "수동 등록"])
+page = st.sidebar.radio("메뉴", ["매출", "트렌드", "정산", "주문", "반품", "노출 전략", "상품 관리", "신규 등록", "수동 등록"])
 
 if selected_account is not None:
     st.sidebar.divider()
@@ -242,13 +249,16 @@ if page == "상품 관리":
         _sc = dict(zip(_status_counts["coupang_status"], _status_counts["cnt"])) if not _status_counts.empty else {}
         _k1, _k2, _k3, _k4 = st.columns(4)
         _k1.metric("판매중", f"{_sc.get('active', 0):,}건")
-        _k2.metric("대기", f"{_sc.get('pending', 0):,}건")
-        _k3.metric("품절/중지", f"{_sc.get('sold_out', 0) + _sc.get('stopped', 0):,}건")
+        _k2.metric("판매중지", f"{_sc.get('paused', 0):,}건")
+        _k3.metric("품절/기타", f"{_sc.get('sold_out', 0) + _sc.get('pending', 0) + _sc.get('rejected', 0):,}건")
         _k4.metric("전체", f"{sum(_sc.values()):,}건")
 
         col_f1, col_f2 = st.columns([1, 2])
         with col_f1:
-            status_filter = st.selectbox("상태 필터", ["active", "전체", "pending", "rejected", "sold_out"], key="lst_st")
+            _filter_options = ["판매중", "판매중지", "전체", "대기", "품절", "반려"]
+            _filter_map = {"판매중": "active", "판매중지": "paused", "대기": "pending", "품절": "sold_out", "반려": "rejected"}
+            _filter_label = st.selectbox("상태 필터", _filter_options, key="lst_st")
+            status_filter = _filter_map.get(_filter_label, _filter_label)
         with col_f2:
             search_q = st.text_input("검색 (상품명 / ISBN / SKU)", key="lst_search")
 
@@ -274,23 +284,212 @@ if page == "상품 관리":
                    COALESCE(l.brand, '') as 출판사,
                    COALESCE(l.coupang_product_id, '-') as 쿠팡ID,
                    COALESCE(l.vendor_item_id, '') as VID,
-                   l.uploaded_at as 등록일
+                   l.uploaded_at as 등록일,
+                   pub.supply_rate as _pub_rate,
+                   b.publisher_name as _book_pub
             FROM listings l
+            LEFT JOIN publishers pub ON l.brand = pub.name
+            LEFT JOIN books b ON l.isbn = b.isbn
             WHERE {where_sql}
             ORDER BY l.uploaded_at DESC
         """, _lst_params)
 
         if not listings_df.empty:
+            # 브랜드 별칭 → publishers 매핑
+            _brand_alias = {
+                # 크라운 (55%)
+                "크라운출판사": "크라운", "에듀크라운": "크라운", "이찬석": "크라운", "김준한": "크라운",
+                "안혜숙": "크라운", "노수정": "크라운",
+                # 영진 (55%)
+                "영진닷컴": "영진", "영진.com": "영진", "영진com": "영진", "영진.com(영진닷컴)": "영진",
+                "영진com 영진닷컴": "영진", "영진정보연구소": "영진", "홍태성": "영진",
+                "이노플리아": "영진", "웅진북센": "영진", "일마": "영진",
+                "이기적": "영진", "이기적컴활": "영진", "이기적 컴활1급 필기기본서": "영진",
+                "이기적 컴퓨터활용능력": "영진", "박윤정": "영진",
+                # 매스티안 (55%)
+                "매스티안 R&D 센터": "매스티안", "매스티안 편집부": "매스티안",
+                "창의사고력 수학 팩토 세트": "매스티안", "미메시스": "매스티안",
+                # 소마 (60%)
+                "소마셈": "소마", "soma": "소마", "소마출판사": "소마", "소마사고력수학": "소마",
+                "소마사고력수학 연구소": "소마", "soma(소마)": "소마",
+                # 씨투엠에듀 (60%)
+                "씨투엠": "씨투엠에듀", "씨투엠에듀(C2M EDU)": "씨투엠에듀",
+                "플라토 세트": "씨투엠에듀", "플라토": "씨투엠에듀", "수학독해 세트": "씨투엠에듀",
+                # 해람북스 (40%)
+                "해람북스(구 북스홀릭)": "해람북스", "송설북": "해람북스", "해람북스기획팀": "해람북스",
+                "해림북스": "해람북스", "방과후교육연구회": "해람북스", "기획팀": "해람북스",
+                # 능률교육 (65%)
+                "NE능률": "능률교육", "엔이능률": "능률교육", "능률교": "능률교육",
+                # 좋은책신사고 (70%)
+                "신사고": "좋은책신사고", "홍범준, 신사고수학콘텐츠연구회": "좋은책신사고",
+                "홍범준": "좋은책신사고", "홍범준 , 좋은책신사고 편집부": "좋은책신사고",
+                "신사고초등콘텐츠연구회": "좋은책신사고", "신사고국어콘텐츠연구회": "좋은책신사고",
+                "쎈": "좋은책신사고", "쎈B": "좋은책신사고", "쎈 공통수학": "좋은책신사고",
+                "쎈 미적분": "좋은책신사고", "라이트쎈": "좋은책신사고", "일품": "좋은책신사고",
+                "우공비": "좋은책신사고",
+                # 이지스퍼블리싱 (60%)
+                "이지스에듀": "이지스퍼블리싱", "이지스에듀(이지스퍼블리싱)": "이지스퍼블리싱",
+                "이지퍼블리싱": "이지스퍼블리싱", "이성용": "이지스퍼블리싱",
+                # EBS (73%)
+                "EBS한국교육방송공사": "EBS", "한국교육방송공사(EBSi)": "EBS",
+                "한국교육방송공사(초등)": "EBS", "EBS교육방송": "EBS",
+                "ebs": "EBS", "EBSI": "EBS", "EBS 수능완성": "EBS",
+                "기출의 미래": "EBS", "수능특강": "한국교육방송공사",
+                # 수경출판사 (65%)
+                "수경": "수경출판사", "수경출판사(학습)": "수경출판사", "수경수학콘텐츠연구소": "수경출판사",
+                "자이스토리": "수경출판사", "수력충전": "수경출판사",
+                # 이퓨처 (60%)
+                "이퓨쳐": "이퓨처",
+                # 마더텅 (65%)
+                "마더텅 편집부": "마더텅", "마덩텅": "마더텅",
+                # 지학사 (65%)
+                "풍산자": "지학사", "지학사(학습)": "지학사",
+                # 비상교육 (65%)
+                "비상": "비상교육", "VISANG교육": "비상교육", "비상ESN": "비상교육",
+                "비상교육 편집부": "비상교육", "비상교육편집부": "비상교육",
+                "오투": "비상교육", "개념+유형": "비상교육", "개념유형": "비상교육",
+                "유형만렙": "비상교육", "유형만렙 중학 수학": "비상교육",
+                # 렉스미디어 (40%)
+                "REXmedia(렉스미디어)": "렉스미디어", "REXmedia 렉스미디어": "렉스미디어",
+                "렉스기획팀": "렉스미디어", "렉스디어": "렉스미디어",
+                # 길벗 (60%)
+                "기사북닷컴": "크라운", "가을책방": "길벗", "길벗출판사": "길벗",
+                "환상감자": "길벗", "피피티프로": "길벗", "디렌드라신하": "길벗", "고경희": "길벗",
+                "마주현(워킹노마드)": "길벗",
+                # 아카데미소프트 (40%)
+                "아소미디어(아카데미소프트)": "아카데미소프트", "아소미디어": "아카데미소프트",
+                "아카데미소프트사": "아카데미소프트", "아케데미소프트": "아카데미소프트",
+                "KIE 기획연구실": "아카데미소프트", "KIE 기획연구실 감수": "아카데미소프트",
+                "KIE기획연구실감수": "아카데미소프트", "코딩이지": "아카데미소프트",
+                "씨엔씨에듀": "아카데미소프트", "코딩아카데미": "아카데미소프트",
+                # 동아 (67%)
+                "동아출판": "동아", "동아출판사": "동아", "동아출판편집부": "동아", "동아출판 수학팀": "동아",
+                "히어로": "동아",
+                # 마린북스 (40%)
+                "마린북스 교재개발팀": "마린북스",
+                # 렉스미디어닷넷 (40%)
+                "류은희": "렉스미디어닷넷", "조준현": "렉스미디어닷넷", "김상민": "렉스미디어닷넷",
+                # 이투스북 (65%)
+                "이투스에듀 수학개발팀": "이투스북", "고쟁이": "이투스북",
+                "수학의 바이블개념ON": "이투스북", "북마트": "이투스북",
+                # 에듀원 (62%)
+                "에듀원편집부": "에듀원", "에듀원 편집부": "에듀원", "에듀윈": "에듀원",
+                "백발백중 100발 100중": "에듀원", "아이와함께": "에듀원", "브랜드없음": "에듀원",
+                # 에듀플라자 (62%)
+                "(주)에듀플라자": "에듀플라자", "에듀플러스": "에듀플라자",
+                "내신콘서트": "에듀플라자",
+                # 베스트콜렉션 (62%)
+                "베스트교육(베스트콜렉션)": "베스트콜렉션", "베스트컬렉션": "베스트콜렉션",
+                "베스트교육": "베스트콜렉션",
+                # 디딤돌 (65%)
+                "디딤돌교육(학습)": "디딤돌", "디딤돌 편집부": "디딤돌",
+                "디딤돌교육 학습": "디딤돌", "디딤돌 초등수학 연구소": "디딤돌",
+                # 꿈을담는틀 (65%)
+                "꿈을 담는 틀": "꿈을담는틀", "꿈틀": "꿈을담는틀",
+                # 미래엔에듀 (65%)
+                "미래엔": "미래엔에듀",
+                # 사회평론 (60%)
+                "Bricks": "사회평론", "BRICKS READING": "사회평론",
+                "Bricks Reading Nonfiction": "사회평론", "브릭스": "사회평론",
+                # 진학사 (65%)
+                "천재교육": "진학사", "천재": "진학사",
+                # 시대고시
+                "시대고시기획": "시대고시",
+                # 기타
+                "빅식스": "해람북스", "제이북스": "비상교육",
+                "e-future": "이퓨처", "이퓨쳐(e-future)": "이퓨처",
+                "에듀왕": "에듀원", "에듀왕(왕수학)": "에듀원",
+                "아이베이비북": "해람북스",
+                "일품 중등수학 2-2": "좋은책신사고",
+                "완자 기출PICK 중학 과학": "비상교육", "완자 기출PICK 중학 사회": "비상교육",
+                "개념원리 RPM 알피엠 확률과통계": "개념원리",
+                "2026 마더텅 전국연합 학력평가 기출문제집 고1 한국사": "마더텅",
+                "Full수록(풀수록) 전국연합 모의고사 국어영역 고1": "비상교육",
+                "밀크북(milkbook)": "해람북스",
+            }
+            _pub_rates = dict(query_df("SELECT name, supply_rate FROM publishers").values.tolist())
+
+            def _resolve_rate(row):
+                # 1순위: publishers 직접 매칭
+                if pd.notna(row["_pub_rate"]):
+                    return float(row["_pub_rate"])
+                brand = str(row["출판사"])
+                # 2순위: 브랜드 별칭 매핑
+                alias = _brand_alias.get(brand)
+                if alias and alias in _pub_rates:
+                    return float(_pub_rates[alias])
+                # 3순위: ISBN → books.publisher_name → publishers
+                book_pub = row.get("_book_pub")
+                if pd.notna(book_pub) and book_pub:
+                    if book_pub in _pub_rates:
+                        return float(_pub_rates[book_pub])
+                    # books 출판사도 별칭 체크
+                    alias2 = _brand_alias.get(book_pub)
+                    if alias2 and alias2 in _pub_rates:
+                        return float(_pub_rates[alias2])
+                return 0.65  # 기본값
+
+            listings_df["_supply_rate"] = listings_df.apply(_resolve_rate, axis=1)
+
+            # 순마진 계산: 판매가 - 공급가(정가×공급율) - 수수료(판매가×11%) - 셀러부담배송비
+            _lp = listings_df["정가"].fillna(0).astype(int)
+            _sp = listings_df["판매가"].fillna(0).astype(int)
+            _sr = listings_df["_supply_rate"].astype(float)
+            _supply = (_lp * _sr).astype(int)
+            _fee = (_sp * COUPANG_FEE_RATE).astype(int)
+            _margin = _sp - _supply - _fee
+            # 셀러 부담 배송비 = 실제택배비 - 고객부담배송비 (배송비 컬럼 = 고객 부담분)
+            _customer_fee = listings_df["배송비"].fillna(0).astype(int)
+            _ship_cost = (DEFAULT_SHIPPING_COST - _customer_fee).clip(lower=0)
+            listings_df["순마진"] = (_margin - _ship_cost).astype(int)
+            listings_df["공급율"] = (_sr * 100).round(0).astype(int).astype(str) + "%"
+            listings_df.drop(columns=["_supply_rate", "_pub_rate", "_book_pub"], inplace=True)
+
+            # 상태 한글 변환
+            _status_label = {"active": "판매중", "paused": "판매중지", "pending": "대기", "sold_out": "품절", "rejected": "반려"}
+            listings_df["상태"] = listings_df["상태"].map(_status_label).fillna(listings_df["상태"])
+
+            # 배송유형 한글 변환 + 배송비 결합
+            def _fmt_ship_type(row):
+                t = str(row.get("배송유형", "") or "")
+                c = int(row.get("배송비", 0) or 0)
+                if t == "FREE":
+                    return "무료배송"
+                if t == "CONDITIONAL_FREE":
+                    if c <= 0:
+                        return "조건부무료"
+                    sr_str = str(row.get("공급율", "65%") or "65%")
+                    sr_pct = int(sr_str.replace("%", "").strip() or "65")
+                    if sr_pct > 70:
+                        thr = "6만"
+                    elif sr_pct > 67:
+                        thr = "3만"
+                    elif sr_pct > 65:
+                        thr = "2.5만"
+                    else:
+                        thr = "2만"
+                    return f"조건부({c:,}원/{thr}↑무료)"
+                if t == "NOT_FREE":
+                    return f"유료({c:,}원)"
+                return t or "-"
+            listings_df["배송"] = listings_df.apply(_fmt_ship_type, axis=1)
+
+            # 그리드 표시 컬럼 순서
+            _grid_cols = ["상품명", "정가", "판매가", "순마진", "공급율", "배송", "재고", "상태", "ISBN", "출판사", "쿠팡ID", "VID", "등록일"]
+            _grid_df = listings_df[_grid_cols]
+
             _cap_col, _dl_col = st.columns([4, 1])
-            _cap_col.caption(f"총 {len(listings_df):,}건  |  행 클릭 → 하단 상세보기")
-            _csv_lst = listings_df.to_csv(index=False).encode("utf-8-sig")
+            _cap_col.caption(f"총 {len(_grid_df):,}건  |  행 클릭 → 하단 상세보기")
+            _csv_lst = _grid_df.to_csv(index=False).encode("utf-8-sig")
             _dl_col.download_button("📥 CSV", _csv_lst, f"products_{selected_account_name}.csv", "text/csv", key="dl_lst")
 
-            gb = GridOptionsBuilder.from_dataframe(listings_df)
+            gb = GridOptionsBuilder.from_dataframe(_grid_df)
             gb.configure_selection(selection_mode="single", use_checkbox=False)
+            gb.configure_column("상품명", minWidth=200)
+            gb.configure_column("공급율", width=70)
             gb.configure_grid_options(domLayout="normal")
             grid_resp = AgGrid(
-                listings_df,
+                _grid_df,
                 gridOptions=gb.build(),
                 update_on=["selectionChanged"],
                 height=400,
@@ -330,11 +529,12 @@ if page == "상품 관리":
                     st.markdown(f"### {sel['상품명']}")
                     if author:
                         st.caption(f"저자: {author}")
-                    dc1, dc2, dc3, dc4 = st.columns(4)
+                    dc1, dc2, dc3, dc4, dc5 = st.columns(5)
                     dc1.metric("정가", f"{int(sel['정가'] or 0):,}원")
                     dc2.metric("판매가", f"{int(sel['판매가'] or 0):,}원")
-                    dc3.metric("상태", sel["상태"])
-                    dc4.metric("쿠팡ID", sel["쿠팡ID"] or "-")
+                    dc3.metric("순마진", f"{int(sel.get('순마진', 0) or 0):,}원")
+                    dc4.metric("상태", sel["상태"])
+                    dc5.metric("쿠팡ID", sel["쿠팡ID"] or "-")
                     st.markdown(f"**ISBN:** `{sel['ISBN'] or '-'}`  |  **VID:** `{sel['VID'] or '-'}`  |  **등록일:** {sel['등록일'] or '-'}")
                     if description:
                         with st.expander("상품 설명"):
@@ -367,7 +567,7 @@ if page == "상품 관리":
                         with _sc1:
                             if st.button("판매 중지", type="secondary", disabled=not _sale_confirm, key="btn_stop_sale"):
                                 try:
-                                    _wing_client.stop_item_sale(int(_sel_vid))
+                                    _wing_client.stop_item_sale(int(_sel_vid), dashboard_override=True)
                                     run_sql("UPDATE listings SET coupang_status='sold_out' WHERE account_id=:aid AND vendor_item_id=:vid",
                                             {"aid": account_id, "vid": _sel_vid})
                                     st.success("판매 중지 완료")
@@ -418,7 +618,7 @@ if page == "상품 관리":
                                     # WING API 기준가격 변경
                                     if new_orig != _cur_orig_price and _sel_vid and _wing_client and new_orig > 0:
                                         try:
-                                            _wing_client.update_original_price(int(_sel_vid), new_orig)
+                                            _wing_client.update_original_price(int(_sel_vid), new_orig, dashboard_override=True)
                                         except CoupangWingError as e:
                                             st.warning(f"기준가격 API 반영 실패: {e.message}")
                                     st.success("저장 완료")
@@ -527,7 +727,7 @@ if page == "상품 관리":
                             _pr_match = _price_diff_df[_price_diff_df["VID"] == _pr_vid]
                             _pr_target = int(_pr_match.iloc[0]["판매가"]) if not _pr_match.empty else int(_pr.get("판매가", 0))
                             try:
-                                _wing_client.update_price(int(_pr_vid), _pr_target)
+                                _wing_client.update_price(int(_pr_vid), _pr_target, dashboard_override=True)
                                 run_sql("UPDATE listings SET coupang_sale_price=:sp WHERE account_id=:aid AND vendor_item_id=:vid",
                                         {"sp": _pr_target, "aid": account_id, "vid": _pr_vid})
                                 _pd_ok += 1
@@ -786,116 +986,94 @@ if page == "상품 관리":
 # 신규 등록
 # ═══════════════════════════════════════
 elif page == "신규 등록":
-    st.title(f"{selected_account_name} 신규 등록")
+    st.title("신규 등록")
 
-    if selected_account is None:
-        st.warning("왼쪽에서 계정을 선택하세요.")
-        st.stop()
+    # WING API 활성 계정 로드 (멀티 계정 등록용)
+    _wing_accounts = accounts_df[accounts_df["wing_api_enabled"] == 1].to_dict("records")
+    _wing_account_cnt = len(_wing_accounts)
 
-    account_id = int(selected_account["id"])
-    outbound_code = selected_account.get("outbound_shipping_code", "")
-    return_code = selected_account.get("return_center_code", "")
-
-    if not outbound_code or not return_code:
-        st.error("출고지/반품지 코드 미설정")
-        st.stop()
-
-    # 미등록 상품 전체 (registration_status + supply_rate 포함)
-    ready = query_df(f"""
+    # 전체 ready 상품 + 계정별 등록 현황
+    ready = query_df("""
         SELECT p.id as product_id, b.title, b.author, b.publisher_name,
                b.isbn, b.image_url, b.list_price, p.sale_price, p.net_margin,
                p.shipping_policy, p.supply_rate, b.year, b.description,
-               COALESCE(p.registration_status, 'approved') as registration_status
+               COALESCE(b.sales_point, 0) as sales_point,
+               COALESCE(p.registration_status, 'approved') as registration_status,
+               COALESCE(lc.listed_count, 0) as listed_count,
+               COALESCE(lc.listed_accounts, '') as listed_accounts
         FROM products p
         JOIN books b ON p.book_id = b.id
+        LEFT JOIN (
+            SELECT COALESCE(l.isbn, l.product_name) as match_key,
+                   COUNT(DISTINCT l.account_id) as listed_count,
+                   GROUP_CONCAT(DISTINCT a.account_name) as listed_accounts
+            FROM listings l
+            JOIN accounts a ON l.account_id = a.id
+            GROUP BY match_key
+        ) lc ON lc.match_key = COALESCE(b.isbn, b.title)
         WHERE p.status = 'ready' AND p.can_upload_single = 1
-          AND p.isbn NOT IN (
-              SELECT COALESCE(l.isbn, '') FROM listings l
-              WHERE l.account_id = {account_id} AND l.isbn IS NOT NULL
-          )
-          AND b.title NOT IN (
-              SELECT COALESCE(l.product_name, '') FROM listings l
-              WHERE l.account_id = {account_id} AND l.product_name IS NOT NULL
-          )
-        ORDER BY p.shipping_policy DESC, p.net_margin ASC
+        ORDER BY COALESCE(b.sales_point, 0) DESC, p.net_margin DESC
     """)
 
     # ── 마진/배송비 실시간 재계산 ──
     def _recalc_margin(row):
-        """출판사 supply_rate 기준 마진/배송정책 재계산
-        - free: 셀러가 배송비 부담 → 순마진 = 마진 - 택배비(2,300)
-        - paid: 소비자가 배송비 부담 → 순마진 = 마진 (배송비 차감 없음)
+        """공급률+정가 기준 마진/배송정책 재계산
+        - free: 셀러가 배송비 전액 부담 → 순마진 = 마진 - 2,300
+        - paid: 고객 부담분만큼 셀러 비용 감소 → 순마진 = 마진 - (2,300 - 고객부담)
         """
         lp = int(row.get("list_price", 0) or 0)
         sr = float(row.get("supply_rate", 0.65) or 0.65)
+        margin_rate_pct = int(round(sr * 100))
         sp = int(lp * BOOK_DISCOUNT_RATE)
         supply_cost = int(lp * sr)
         fee = int(sp * COUPANG_FEE_RATE)
-        margin = sp - supply_cost - fee  # 배송비 제외 순수 마진
-        # 배송정책 판단: 셀러가 배송비 부담한다고 가정한 최악 마진 기준
-        worst_net = margin - DEFAULT_SHIPPING_COST
-        if worst_net >= FREE_SHIPPING_THRESHOLD:
-            policy = "free"
-            actual_net = worst_net  # 셀러 부담
-        elif worst_net >= 0:
-            policy = "paid"
-            actual_net = margin  # 소비자가 배송비 부담 → 배송비 차감 없음
-        else:
-            policy = "bundle_required"
-            actual_net = worst_net
+        margin = sp - supply_cost - fee
+        # 공급률+정가 기반 배송비 결정
+        customer_fee = determine_customer_shipping_fee(margin_rate_pct, lp)
+        seller_ship = DEFAULT_SHIPPING_COST - customer_fee
+        actual_net = margin - seller_ship
+        policy = "free" if customer_fee == 0 else "paid"
         return pd.Series({
             "calc_sale": sp, "calc_supply": supply_cost, "calc_fee": fee,
             "calc_margin": margin, "calc_net": actual_net, "calc_ship": policy,
+            "calc_customer_fee": customer_fee,
         })
 
     if not ready.empty:
         _calc = ready.apply(_recalc_margin, axis=1)
         ready = pd.concat([ready, _calc], axis=1)
-        # 배송비 변경 여부 표시
         ready["ship_changed"] = ready["shipping_policy"] != ready["calc_ship"]
 
-    total_registered = query_df(f"SELECT COUNT(*) as c FROM listings WHERE account_id = {account_id}")
-    reg_cnt = int(total_registered.iloc[0]["c"]) if not total_registered.empty else 0
+    _all_listed_cnt = len(ready[ready["listed_count"] >= _wing_account_cnt]) if not ready.empty else 0
 
-    # KPI 메트릭 (승인 상태별)
     pending_cnt = len(ready[ready["registration_status"] == "pending_review"]) if not ready.empty else 0
     approved_cnt = len(ready[ready["registration_status"] == "approved"]) if not ready.empty else 0
     rejected_cnt = len(ready[ready["registration_status"] == "rejected"]) if not ready.empty else 0
-    ship_changed_cnt = int(ready["ship_changed"].sum()) if not ready.empty and "ship_changed" in ready.columns else 0
 
-    k1, k2, k3, k4, k5 = st.columns(5)
-    k1.metric("등록 가능 (승인됨)", f"{approved_cnt}건")
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("등록 가능 (승인)", f"{approved_cnt}건")
     k2.metric("검토 대기", f"{pending_cnt}건")
     k3.metric("거부됨", f"{rejected_cnt}건")
-    k4.metric("이미 등록됨", f"{reg_cnt:,}건")
-    k5.metric("배송비 변경 필요", f"{ship_changed_cnt}건", delta=f"{ship_changed_cnt}" if ship_changed_cnt > 0 else None, delta_color="inverse")
+    k4.metric(f"전 계정 등록 완료", f"{_all_listed_cnt}건")
 
-    # ── 배송비 재계산 요약 + 일괄 적용 ──
+    # DB 배송정책 불일치 일괄 반영
+    ship_changed_cnt = int(ready["ship_changed"].sum()) if not ready.empty and "ship_changed" in ready.columns else 0
     if not ready.empty and ship_changed_cnt > 0:
-        with st.container(border=True):
-            st.markdown(f"**배송비 재계산 결과** — {ship_changed_cnt}건의 배송정책이 현재 DB와 다릅니다")
-            _ship_summary = ready[ready["ship_changed"]].groupby(["shipping_policy", "calc_ship"]).size().reset_index(name="건수")
-            _ship_summary.columns = ["현재 배송정책", "재계산 결과", "건수"]
-            _ship_label_map = {"free": "무료", "paid": "유료(2,500)", "bundle_required": "묶음필수"}
-            _ship_summary["현재 배송정책"] = _ship_summary["현재 배송정책"].map(_ship_label_map)
-            _ship_summary["재계산 결과"] = _ship_summary["재계산 결과"].map(_ship_label_map)
-            st.dataframe(_ship_summary, hide_index=True, width="stretch")
-
-            if st.button(f"배송비 재계산 DB 일괄 적용 ({ship_changed_cnt}건)", type="primary", key="btn_recalc_apply"):
-                _update_cnt = 0
-                for _, _r in ready[ready["ship_changed"]].iterrows():
-                    try:
-                        run_sql(
-                            "UPDATE products SET sale_price=:sp, net_margin=:nm, shipping_policy=:sh WHERE id=:id",
-                            {"sp": int(_r["calc_sale"]), "nm": int(_r["calc_net"]),
-                             "sh": _r["calc_ship"], "id": int(_r["product_id"])}
-                        )
-                        _update_cnt += 1
-                    except Exception as _e:
-                        logger.warning(f"재계산 적용 실패 (pid={_r['product_id']}): {_e}")
-                st.success(f"배송비 재계산 적용 완료: {_update_cnt}건")
-                st.cache_data.clear()
-                st.rerun()
+        if st.button(f"DB 배송정책 동기화 ({ship_changed_cnt}건)", key="btn_recalc_apply"):
+            _update_cnt = 0
+            for _, _r in ready[ready["ship_changed"]].iterrows():
+                try:
+                    run_sql(
+                        "UPDATE products SET sale_price=:sp, net_margin=:nm, shipping_policy=:sh WHERE id=:id",
+                        {"sp": int(_r["calc_sale"]), "nm": int(_r["calc_net"]),
+                         "sh": _r["calc_ship"], "id": int(_r["product_id"])}
+                    )
+                    _update_cnt += 1
+                except Exception as _e:
+                    logger.warning(f"재계산 적용 실패 (pid={_r['product_id']}): {_e}")
+            st.success(f"DB 동기화 완료: {_update_cnt}건")
+            st.cache_data.clear()
+            st.rerun()
 
     # 알라딘 크롤링
     with st.expander("알라딘에서 새 도서 검색"):
@@ -930,8 +1108,8 @@ elif page == "신규 등록":
         st.info("등록 가능한 신규 상품이 없습니다. 알라딘 크롤링을 해보세요.")
         st.stop()
 
-    # 필터 (승인 상태 + 출판사 + 최소 마진)
-    cf1, cf2, cf3 = st.columns(3)
+    # 필터 (승인 상태 + 출판사 + 최소 마진 + 등록 완료 제외)
+    cf1, cf2, cf3, cf4 = st.columns([1, 1, 1, 1])
     with cf1:
         status_options = ["전체", "검토 대기", "승인됨", "거부됨"]
         status_f = st.selectbox("등록 상태", status_options, key="nr_status")
@@ -940,15 +1118,20 @@ elif page == "신규 등록":
         pub_f = st.selectbox("출판사", pubs, key="nr_pub")
     with cf3:
         min_m = st.number_input("최소 마진(원)", value=0, step=500, key="nr_mm")
+    with cf4:
+        hide_full = st.checkbox("전 계정 등록 완료 숨김", value=True, key="nr_hide_full")
 
     _status_map = {"검토 대기": "pending_review", "승인됨": "approved", "거부됨": "rejected"}
     filtered = ready.copy()
+    if hide_full:
+        filtered = filtered[filtered["listed_count"] < _wing_account_cnt]
     if status_f != "전체":
         filtered = filtered[filtered["registration_status"] == _status_map[status_f]]
     if pub_f != "전체":
         filtered = filtered[filtered["publisher_name"] == pub_f]
     if min_m > 0:
-        filtered = filtered[filtered["net_margin"] >= min_m]
+        _margin_col = "calc_net" if "calc_net" in filtered.columns else "net_margin"
+        filtered = filtered[filtered[_margin_col] >= min_m]
 
     if filtered.empty:
         st.info("필터 조건에 맞는 상품이 없습니다.")
@@ -965,26 +1148,48 @@ elif page == "신규 등록":
     _status_label = {"pending_review": "검토 대기", "approved": "승인", "rejected": "거부"}
     display["등록상태"] = display["registration_status"].map(_status_label).fillna("검토 대기")
 
-    _ship_label = {"free": "무료", "paid": "유료(2,500)", "bundle_required": "묶음필수"}
-    display["배송비"] = display["shipping_policy"].map(_ship_label).fillna(display["shipping_policy"])
-    display["재계산배송"] = display["calc_ship"].map(_ship_label).fillna("") if "calc_ship" in display.columns else ""
+    def _ship_display(row):
+        """배송비 표시: 무료 / 조건부(X원/Y만↑무료)"""
+        cf = int(row.get("calc_customer_fee", 0)) if "calc_customer_fee" in row.index else 0
+        policy = row.get("calc_ship", row.get("shipping_policy", "paid"))
+        if policy == "free":
+            return "무료배송"
+        sr_pct = int(round(float(row.get("supply_rate", 0.65) or 0.65) * 100))
+        if sr_pct > 70:
+            thr = "6만"
+        elif sr_pct > 67:
+            thr = "3만"
+        elif sr_pct > 65:
+            thr = "2.5만"
+        else:
+            thr = "2만"
+        fee = cf if cf > 0 else 2300
+        return f"조건부({fee:,}원/{thr}↑무료)"
+    display["배송"] = display.apply(_ship_display, axis=1)
     display["공급율"] = (display["supply_rate"] * 100).round(0).astype(int).astype(str) + "%" if "supply_rate" in display.columns else ""
-    display["재계산마진"] = display["calc_net"].astype(int) if "calc_net" in display.columns else 0
-    display["변경"] = display["ship_changed"].map({True: "⚠", False: ""}) if "ship_changed" in display.columns else ""
+    display["순마진"] = display["calc_net"].astype(int) if "calc_net" in display.columns else display["net_margin"].astype(int)
+    # 등록 현황: "0/5" 또는 "2/5 (007-book,007-ez)"
+    def _fmt_listed(row):
+        cnt = int(row["listed_count"])
+        accs = str(row.get("listed_accounts", "") or "")
+        if cnt == 0 or not accs:
+            return f"0/{_wing_account_cnt}"
+        return f"{cnt}/{_wing_account_cnt} ({accs})"
+    display["등록"] = display.apply(_fmt_listed, axis=1)
 
-    nr_grid_df = display[["title", "publisher_name", "isbn", "list_price", "sale_price", "net_margin", "공급율", "배송비", "재계산마진", "재계산배송", "변경", "등록상태", "year"]].rename(columns={
+    display["판매지수"] = display["sales_point"].astype(int) if "sales_point" in display.columns else 0
+    nr_grid_df = display[["title", "publisher_name", "list_price", "sale_price", "순마진", "판매지수", "공급율", "배송", "등록상태", "등록", "isbn", "year"]].rename(columns={
         "title": "제목", "publisher_name": "출판사", "isbn": "ISBN",
-        "list_price": "정가", "sale_price": "판매가", "net_margin": "순마진", "year": "연도",
+        "list_price": "정가", "sale_price": "판매가", "year": "연도",
     })
     nr_gb = GridOptionsBuilder.from_dataframe(nr_grid_df)
     nr_gb.configure_selection(selection_mode="multiple", use_checkbox=True)
-    nr_gb.configure_column("제목", headerCheckboxSelection=True, minWidth=200)
-    nr_gb.configure_column("배송비", width=90)
-    nr_gb.configure_column("재계산배송", width=90)
-    nr_gb.configure_column("재계산마진", width=90)
+    nr_gb.configure_column("제목", headerCheckboxSelection=True, minWidth=250)
+    nr_gb.configure_column("판매지수", width=80, sort="desc")
     nr_gb.configure_column("공급율", width=70)
-    nr_gb.configure_column("변경", width=50)
+    nr_gb.configure_column("배송", width=100)
     nr_gb.configure_column("등록상태", width=80)
+    nr_gb.configure_column("등록", minWidth=150)
     nr_gb.configure_grid_options(domLayout="normal", suppressRowClickSelection=False)
     nr_grid = AgGrid(
         nr_grid_df,
@@ -996,11 +1201,15 @@ elif page == "신규 등록":
     )
 
     nr_selected = nr_grid["selected_rows"]
-    sel_idx = []
-    if nr_selected is not None and len(nr_selected) > 0:
-        _sel_df = nr_selected if isinstance(nr_selected, pd.DataFrame) else pd.DataFrame(nr_selected)
-        sel_titles = _sel_df["제목"].tolist()
-        sel_idx = [i for i, t in enumerate(display["title"]) if t in sel_titles]
+    # AgGrid 선택을 session_state에 보존 (버튼 클릭 rerun 시 선택 소실 방지)
+    if nr_selected is not None:
+        if len(nr_selected) > 0:
+            _sel_df = nr_selected if isinstance(nr_selected, pd.DataFrame) else pd.DataFrame(nr_selected)
+            st.session_state["nr_sel_titles"] = _sel_df["제목"].tolist()
+        else:
+            st.session_state["nr_sel_titles"] = []
+    _persisted_titles = st.session_state.get("nr_sel_titles", [])
+    sel_idx = [i for i, t in enumerate(display["title"]) if t in _persisted_titles]
     sel_cnt = len(sel_idx)
 
     # ── 일괄 승인/거부 버튼 ──
@@ -1052,7 +1261,15 @@ elif page == "신규 등록":
                 author = book_id_row.iloc[0]["author"] if not book_id_row.empty else ""
                 _cur_status = nr_sel.get("등록상태", "검토 대기")
                 st.markdown(f"{author or ''} | {nr_sel['publisher_name']} | ISBN: `{nr_sel['isbn']}` | 상태: **{_cur_status}**")
-                st.markdown(f"정가 {int(nr_sel['list_price']):,}원 → 판매가 {int(nr_sel['sale_price']):,}원 | 순마진 **{int(nr_sel['net_margin']):,}원**")
+                _detail_net = int(nr_sel.get('calc_net', nr_sel.get('net_margin', 0)) or 0)
+                st.markdown(f"정가 {int(nr_sel['list_price']):,}원 → 판매가 {int(nr_sel['sale_price']):,}원 | 순마진 **{_detail_net:,}원**")
+                # 등록된 계정 표시
+                _listed_accs = str(nr_sel.get("listed_accounts", "") or "")
+                _listed_cnt = int(nr_sel.get("listed_count", 0))
+                if _listed_cnt > 0 and _listed_accs:
+                    st.markdown(f"등록 계정: **{_listed_accs}** ({_listed_cnt}/{_wing_account_cnt})")
+                else:
+                    st.markdown(f"등록 계정: 없음 (0/{_wing_account_cnt})")
 
                 # 개별 승인/거부 버튼
                 _pid = int(nr_sel["product_id"])
@@ -1074,7 +1291,17 @@ elif page == "신규 등록":
                 bid = int(book_id_row.iloc[0]["id"]) if not book_id_row.empty else None
                 pid = int(nr_sel["product_id"])
                 if bid:
+                    _bk = book_id_row.iloc[0]
                     with st.form("nr_edit_form"):
+                        # 1행: 제목
+                        ed_title = st.text_input("제목", value=nr_sel["title"] or "")
+                        # 2행: 저자 / 출판사
+                        _er1, _er2 = st.columns(2)
+                        with _er1:
+                            ed_author = st.text_input("저자", value=_bk.get("author", "") or "")
+                        with _er2:
+                            ed_publisher = st.text_input("출판사", value=nr_sel.get("publisher_name", "") or "")
+                        # 3행: 판매가 / 정가 / 배송
                         ed1, ed2, ed3 = st.columns(3)
                         with ed1:
                             ed_sale = st.number_input("판매가", value=int(nr_sel["sale_price"]), step=100)
@@ -1083,9 +1310,20 @@ elif page == "신규 등록":
                         with ed3:
                             ed_ship = st.selectbox("배송", ["free", "paid"],
                                                    index=0 if nr_sel["shipping_policy"] == "free" else 1)
+                        # 4행: 이미지 URL
+                        ed_image = st.text_input("이미지 URL", value=_bk.get("image_url", "") or "")
+                        # 5행: 상품 설명
+                        ed_desc = st.text_area("상품 설명", value=_bk.get("description", "") or "", height=100)
+
                         if st.form_submit_button("저장", type="primary"):
                             try:
-                                run_sql("UPDATE books SET list_price=:lp WHERE id=:id", {"lp": ed_price, "id": bid})
+                                # books 테이블 업데이트
+                                run_sql(
+                                    "UPDATE books SET title=:t, author=:a, publisher_name=:pub, list_price=:lp, image_url=:img, description=:desc WHERE id=:id",
+                                    {"t": ed_title, "a": ed_author, "pub": ed_publisher,
+                                     "lp": ed_price, "img": ed_image, "desc": ed_desc, "id": bid}
+                                )
+                                # products 테이블 업데이트 (마진 재계산)
                                 _sr = float(nr_sel.get("supply_rate", 0.65) or 0.65)
                                 _supply_cost = int(ed_price * _sr)
                                 _fee = int(ed_sale * COUPANG_FEE_RATE)
@@ -1112,83 +1350,164 @@ elif page == "신규 등록":
 
     st.divider()
 
-    # 등록 버튼 (승인된 상품만 업로드 가능)
+    # ── 멀티 계정 선택 + 일괄 등록 ──
     _approved_sel_idx = [i for i in sel_idx if display.iloc[i].get("registration_status") == "approved"]
     _approved_cnt = len(_approved_sel_idx)
     _unapproved_cnt = sel_cnt - _approved_cnt
 
-    cb1, cb2, cb3 = st.columns([2, 1, 3])
-    with cb1:
-        _label = f"**선택: {sel_cnt}건** (승인됨: {_approved_cnt}건)"
-        if _unapproved_cnt > 0:
-            _label += f" | 미승인 {_unapproved_cnt}건 제외"
-        st.markdown(_label)
-    with cb2:
-        dry = st.checkbox("Dry Run", value=True, key="dry", help="실제 등록 안 하고 확인만")
-    with cb3:
-        btn = st.button(
-            f"{'테스트' if dry else '쿠팡에 등록'} ({_approved_cnt}건)",
-            type="primary", disabled=(_approved_cnt == 0),
+    st.subheader("일괄 등록")
+
+    if not _wing_accounts:
+        st.warning("WING API가 활성화된 계정이 없습니다.")
+    else:
+        # 선택 상품 기준 계정별 미등록 수 계산
+        _sel_listed_sets = []
+        for i in sel_idx:
+            accs_str = str(display.iloc[i].get("listed_accounts", "") or "")
+            _sel_listed_sets.append(set(a.strip() for a in accs_str.split(",") if a.strip()))
+
+        _nr_acc_table = []
+        for _acc in _wing_accounts:
+            _acc_name = _acc["account_name"]
+            _unlisted = sum(1 for s in _sel_listed_sets if _acc_name not in s) if sel_cnt > 0 else 0
+            _nr_acc_table.append({
+                "선택": _unlisted > 0,
+                "계정명": _acc_name,
+                "미등록": f"{_unlisted}/{sel_cnt}" if sel_cnt > 0 else "-",
+                "vendorId": _acc.get("vendor_id", ""),
+                "출고지": _acc.get("outbound_shipping_code", "-"),
+                "반품센터": _acc.get("return_center_code", "-"),
+            })
+        _nr_acc_df = pd.DataFrame(_nr_acc_table)
+        _nr_edited_acc = st.data_editor(
+            _nr_acc_df, hide_index=True, key="nr_acc_editor",
+            column_config={
+                "선택": st.column_config.CheckboxColumn("선택", default=True),
+                "계정명": st.column_config.TextColumn("계정명", disabled=True),
+                "미등록": st.column_config.TextColumn("미등록", disabled=True),
+                "vendorId": st.column_config.TextColumn("Vendor ID", disabled=True),
+                "출고지": st.column_config.TextColumn("출고지 코드", disabled=True),
+                "반품센터": st.column_config.TextColumn("반품센터 코드", disabled=True),
+            },
+            width="stretch",
         )
 
-    if btn and _approved_cnt > 0:
-        client = create_wing_client(selected_account)
-        if client is None:
-            st.error("API 키 미설정")
-            st.stop()
+        # 선택된 계정 추출
+        _nr_selected_accounts = []
+        for _idx, _erow in _nr_edited_acc.iterrows():
+            if _erow["선택"]:
+                for _acc in _wing_accounts:
+                    if _acc["account_name"] == _erow["계정명"]:
+                        _nr_selected_accounts.append(_acc)
+                        break
+        _nr_sel_acc_cnt = len(_nr_selected_accounts)
 
-        uploader = CoupangAPIUploader(client, vendor_user_id=selected_account_name)
-        progress = st.progress(0, text="준비 중...")
-        result_box = st.container()
-        ok_list, fail_list = [], []
+        # 등록 정보 요약 (이미 등록된 조합 제외)
+        _sel_acc_names = {a["account_name"] for a in _nr_selected_accounts}
+        _skip_already = 0
+        for i in _approved_sel_idx:
+            accs_str = str(display.iloc[i].get("listed_accounts", "") or "")
+            _already = set(a.strip() for a in accs_str.split(",") if a.strip())
+            _skip_already += len(_already & _sel_acc_names)
+        _total_jobs = _approved_cnt * _nr_sel_acc_cnt - _skip_already
+        cb1, cb2, cb3 = st.columns([3, 1, 3])
+        with cb1:
+            _label = f"**상품 {sel_cnt}건** (승인됨: {_approved_cnt}건) x **{_nr_sel_acc_cnt}계정** = **{_total_jobs}건**"
+            if _skip_already > 0:
+                _label += f" | 이미 등록 {_skip_already}건 제외"
+            if _unapproved_cnt > 0:
+                _label += f" | 미승인 {_unapproved_cnt}건 제외"
+            st.markdown(_label)
+        with cb2:
+            dry = st.checkbox("Dry Run", value=True, key="dry", help="실제 등록 안 하고 확인만")
+        with cb3:
+            btn = st.button(
+                f"{'테스트' if dry else '쿠팡에 등록'} ({_approved_cnt}건 x {_nr_sel_acc_cnt}계정)",
+                type="primary", disabled=(_approved_cnt == 0 or _nr_sel_acc_cnt == 0),
+            )
 
-        for i, idx in enumerate(_approved_sel_idx):
-            row = display.iloc[idx]
-            pd_data = product_to_upload_data(row)
-            name = pd_data["product_name"]
-            progress.progress((i+1)/_approved_cnt, text=f"[{i+1}/{_approved_cnt}] {name[:30]}...")
+        if btn and _approved_cnt > 0 and _nr_sel_acc_cnt > 0:
+            progress = st.progress(0, text="준비 중...")
+            result_box = st.container()
+            ok_list, fail_list, skip_list = [], [], []
+            _done = 0
+            _actual_total = max(_total_jobs, 1)
 
-            if dry:
-                try:
-                    payload = uploader.build_product_payload(pd_data, outbound_code, return_code)
-                    ok_list.append({"제목": name[:40], "ISBN": pd_data["isbn"], "결과": "OK"})
-                except Exception as e:
-                    fail_list.append({"제목": name[:40], "결과": str(e)[:80]})
-            else:
-                res = uploader.upload_product(pd_data, outbound_code, return_code)
-                if res["success"]:
-                    sid = res["seller_product_id"]
-                    ok_list.append({"제목": name[:40], "쿠팡ID": sid, "결과": "성공"})
-                    try:
-                        with engine.connect() as conn:
-                            conn.execute(text("""
-                                INSERT OR IGNORE INTO listings
-                                (account_id, product_type, product_id, isbn, coupang_product_id,
-                                 coupang_status, sale_price, original_price, product_name,
-                                 shipping_policy, upload_method, uploaded_at)
-                                VALUES (:aid, 'single', :pid, :isbn, :cid, 'active', :sp, :op, :pn, :ship, 'api', :now)
-                            """), {
-                                "aid": account_id, "pid": int(row["product_id"]),
-                                "isbn": pd_data["isbn"], "cid": sid,
-                                "sp": pd_data["sale_price"], "op": pd_data["original_price"],
-                                "pn": name, "ship": pd_data["shipping_policy"],
-                                "now": datetime.now().isoformat(),
-                            })
-                            conn.commit()
-                    except Exception as db_e:
-                        logger.warning(f"DB 저장 실패: {db_e}")
-                else:
-                    fail_list.append({"제목": name[:40], "결과": res["message"][:80]})
+            for _pi, idx in enumerate(_approved_sel_idx):
+                row = display.iloc[idx]
+                pd_data = product_to_upload_data(row)
+                name = pd_data["product_name"]
+                _row_listed = set(a.strip() for a in str(row.get("listed_accounts", "") or "").split(",") if a.strip())
 
-        progress.progress(1.0, text="완료!")
-        with result_box:
-            if ok_list:
-                st.success(f"성공: {len(ok_list)}건")
-                st.dataframe(pd.DataFrame(ok_list), width="stretch", hide_index=True)
-            if fail_list:
-                st.error(f"실패: {len(fail_list)}건")
-                st.dataframe(pd.DataFrame(fail_list), width="stretch", hide_index=True)
-        query_df.clear()
+                for _acc in _nr_selected_accounts:
+                    _acc_name = _acc["account_name"]
+
+                    # 이미 등록된 계정 스킵
+                    if _acc_name in _row_listed:
+                        skip_list.append({"계정": _acc_name, "제목": name[:35], "결과": "이미 등록됨"})
+                        continue
+
+                    _done += 1
+                    progress.progress(min(_done / _actual_total, 1.0), text=f"[{_done}/{_total_jobs}] {_acc_name} — {name[:25]}...")
+
+                    _out_code = str(_acc.get("outbound_shipping_code", ""))
+                    _ret_code = str(_acc.get("return_center_code", ""))
+
+                    if not _out_code or not _ret_code:
+                        fail_list.append({"계정": _acc_name, "제목": name[:35], "결과": "출고지/반품지 미설정"})
+                        continue
+
+                    _client = create_wing_client(_acc)
+                    if _client is None:
+                        fail_list.append({"계정": _acc_name, "제목": name[:35], "결과": "API 키 미설정"})
+                        continue
+
+                    _uploader = CoupangAPIUploader(_client, vendor_user_id=_acc_name)
+
+                    if dry:
+                        try:
+                            _uploader.build_product_payload(pd_data, _out_code, _ret_code)
+                            ok_list.append({"계정": _acc_name, "제목": name[:35], "ISBN": pd_data["isbn"], "결과": "OK"})
+                        except Exception as e:
+                            fail_list.append({"계정": _acc_name, "제목": name[:35], "결과": str(e)[:80]})
+                    else:
+                        res = _uploader.upload_product(pd_data, _out_code, _ret_code, dashboard_override=True)
+                        if res["success"]:
+                            sid = res["seller_product_id"]
+                            ok_list.append({"계정": _acc_name, "제목": name[:35], "쿠팡ID": sid, "결과": "성공"})
+                            try:
+                                with engine.connect() as conn:
+                                    conn.execute(text("""
+                                        INSERT OR IGNORE INTO listings
+                                        (account_id, product_type, product_id, isbn, coupang_product_id,
+                                         coupang_status, sale_price, original_price, product_name,
+                                         shipping_policy, upload_method, uploaded_at)
+                                        VALUES (:aid, 'single', :pid, :isbn, :cid, 'active', :sp, :op, :pn, :ship, 'api', :now)
+                                    """), {
+                                        "aid": int(_acc["id"]), "pid": int(row["product_id"]),
+                                        "isbn": pd_data["isbn"], "cid": sid,
+                                        "sp": pd_data["sale_price"], "op": pd_data["original_price"],
+                                        "pn": name, "ship": pd_data["shipping_policy"],
+                                        "now": datetime.now().isoformat(),
+                                    })
+                                    conn.commit()
+                            except Exception as db_e:
+                                logger.warning(f"DB 저장 실패 ({_acc_name}): {db_e}")
+                        else:
+                            fail_list.append({"계정": _acc_name, "제목": name[:35], "결과": res["message"][:80]})
+
+            progress.progress(1.0, text="완료!")
+            with result_box:
+                if ok_list:
+                    st.success(f"성공: {len(ok_list)}건")
+                    st.dataframe(pd.DataFrame(ok_list), width="stretch", hide_index=True)
+                if skip_list:
+                    st.info(f"이미 등록 (스킵): {len(skip_list)}건")
+                if fail_list:
+                    st.error(f"실패: {len(fail_list)}건")
+                    st.dataframe(pd.DataFrame(fail_list), width="stretch", hide_index=True)
+            query_df.clear()
+            st.session_state.pop("nr_sel_titles", None)
 
 
 # ═══════════════════════════════════════
@@ -1584,8 +1903,25 @@ elif page == "수동 등록":
                 key="m_form_tax", help="도서는 기본 비과세",
             )
         with _p_col4:
+            # 출판사 정보로 조건부 무료배송 기준 결정
+            _pub_info = get_publisher_info(_m_publisher) if _m_publisher else None
+            _pub_margin = _pub_info["margin"] if _pub_info else 65
+            if _pub_margin > 70:
+                _cond_thr_label = "6만"
+            elif _pub_margin > 67:
+                _cond_thr_label = "3만"
+            elif _pub_margin > 65:
+                _cond_thr_label = "2.5만"
+            else:
+                _cond_thr_label = "2만"
+            _ship_options = [
+                "무료배송",
+                f"조건부(1,000원/{_cond_thr_label}↑무료)",
+                f"조건부(2,000원/{_cond_thr_label}↑무료)",
+                f"조건부(2,300원/{_cond_thr_label}↑무료)",
+            ]
             _m_shipping = st.radio(
-                "배송비", ["무료배송", "유료(2,500원)"],
+                "배송비", _ship_options,
                 index=0, key="m_form_shipping", horizontal=True,
             )
 
@@ -1593,17 +1929,26 @@ elif page == "수동 등록":
         if _m_sale_price > 0 and _m_list_price > 0:
             _commission_rate = 0.11
             _commission = int(_m_sale_price * _commission_rate)
-            _shipping_cost = 2300
+            # 고객 부담 배송비에 따른 셀러 부담 배송비 계산 (라벨에서 금액 추출)
+            if _m_shipping == "무료배송":
+                _customer_ship = 0
+            elif "1,000원" in _m_shipping:
+                _customer_ship = 1000
+            elif "2,000원" in _m_shipping:
+                _customer_ship = 2000
+            else:
+                _customer_ship = 2300
+            _shipping_cost = DEFAULT_SHIPPING_COST - _customer_ship  # 셀러 부담
             _margin = _m_sale_price - _m_list_price - _commission - _shipping_cost
             _margin_rate = (_margin / _m_sale_price * 100) if _m_sale_price > 0 else 0
-            _margin_color = "#2E7D32" if _margin >= 0 else "#D32F2F"
 
             st.markdown("---")
             _mg1, _mg2, _mg3, _mg4 = st.columns(4)
             with _mg1:
                 st.metric("쿠팡 수수료 (11%)", f"₩{_commission:,}")
             with _mg2:
-                st.metric("배송 원가", f"₩{_shipping_cost:,}")
+                _ship_label = f"₩{_shipping_cost:,}" + (f" (고객 ₩{_customer_ship:,})" if _customer_ship > 0 else " (셀러 전액)")
+                st.metric("셀러 배송 부담", _ship_label)
             with _mg3:
                 st.metric("예상 순마진", f"₩{_margin:,}", delta=f"{_margin_rate:+.1f}%")
             with _mg4:
@@ -1819,6 +2164,7 @@ elif page == "수동 등록":
             "main_image_url": _m_image,
             "description": _m_desc or "상세페이지 참조",
             "shipping_policy": _shipping_policy,
+            "margin_rate": _pub_margin,
         }
 
         with st.expander("페이로드 미리보기"):
@@ -1878,7 +2224,7 @@ elif page == "수동 등록":
                 _uploader = CoupangAPIUploader(_client, vendor_user_id=_acc_name)
                 try:
                     _res = _uploader.upload_product(
-                        _product_data, _out_code, _ret_code,
+                        _product_data, _out_code, _ret_code, dashboard_override=True,
                     )
                     if _res["success"]:
                         _sid = _res["seller_product_id"]
@@ -3202,368 +3548,6 @@ elif page == "정산":
 
 
 # ═══════════════════════════════════════
-# 광고
-# ═══════════════════════════════════════
-elif page == "광고":
-    st.title("광고 분석")
-
-    def _fmt_krw_ad(val):
-        """한국식 금액 표시"""
-        val = int(val)
-        if abs(val) >= 100_000_000:
-            return f"₩{val / 100_000_000:.1f}억"
-        elif abs(val) >= 10_000:
-            return f"₩{val / 10_000:.0f}만"
-        else:
-            return f"₩{val:,}"
-
-    # ad_spends 테이블 보장
-    with engine.connect() as _conn:
-        _conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS ad_spends (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                account_id INTEGER NOT NULL REFERENCES accounts(id),
-                ad_date DATE NOT NULL,
-                campaign_id VARCHAR(50) NOT NULL,
-                campaign_name VARCHAR(200),
-                ad_type VARCHAR(20),
-                ad_objective VARCHAR(50),
-                daily_budget INTEGER DEFAULT 0,
-                spent_amount INTEGER DEFAULT 0,
-                adjustment INTEGER DEFAULT 0,
-                spent_after_adjust INTEGER DEFAULT 0,
-                over_spend INTEGER DEFAULT 0,
-                billable_cost INTEGER DEFAULT 0,
-                vat_amount INTEGER DEFAULT 0,
-                total_charge INTEGER DEFAULT 0,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(account_id, ad_date, campaign_id)
-            )
-        """))
-        _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_ad_account_date ON ad_spends(account_id, ad_date)"))
-        _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_ad_date ON ad_spends(ad_date)"))
-        _conn.commit()
-
-    # ── 상단 컨트롤 ──
-    ad_c1, ad_c2, ad_c3 = st.columns([3, 3, 2])
-    with ad_c1:
-        ad_acct_filter = st.selectbox("계정", ["전체"] + account_names, key="ad_acct")
-    with ad_c2:
-        from datetime import date as _ad_date, timedelta as _ad_td
-        _ad_today = _ad_date.today()
-        _ad_default_from = _ad_today.replace(day=1)
-        _ad_date_range = st.date_input(
-            "기간", value=(_ad_default_from, _ad_today), key="ad_dates"
-        )
-        if isinstance(_ad_date_range, tuple) and len(_ad_date_range) == 2:
-            _ad_from, _ad_to = _ad_date_range
-        else:
-            _ad_from, _ad_to = _ad_default_from, _ad_today
-    with ad_c3:
-        st.markdown("<br>", unsafe_allow_html=True)
-        ad_uploaded = st.file_uploader("Excel 업로드", type=["xlsx"], key="ad_upload",
-                                       label_visibility="collapsed")
-
-    # ── Excel 업로드 처리 ──
-    if ad_uploaded is not None:
-        import tempfile
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx",
-                                          prefix=ad_uploaded.name.replace(".xlsx", "_")) as tmp:
-            tmp.write(ad_uploaded.read())
-            tmp_path = tmp.name
-
-        try:
-            from scripts.sync_ad_spend import AdSpendSync
-            syncer = AdSpendSync(db_path=str(DB_PATH))
-            result = syncer.sync_file(tmp_path)
-
-            if result.get("error"):
-                st.error(f"업로드 오류: {result['error']}")
-            else:
-                st.success(
-                    f"업로드 완료: {result['account']} | {result['period']} | "
-                    f"파싱 {result['parsed']}건, 저장 {result['saved']}건"
-                )
-                query_df.clear()
-        except Exception as e:
-            st.error(f"파싱 오류: {e}")
-            logger.exception("광고 Excel 파싱 오류")
-        finally:
-            os.unlink(tmp_path)
-
-    st.divider()
-
-    # ── 계정/기간 필터 ──
-    _ad_acct_where = ""
-    if ad_acct_filter != "전체":
-        _ad_aid_row = query_df("SELECT id FROM accounts WHERE account_name = :name LIMIT 1",
-                               {"name": ad_acct_filter})
-        if _ad_aid_row.empty:
-            st.error(f"계정 '{ad_acct_filter}'을 찾을 수 없습니다.")
-            st.stop()
-        _ad_acct_id = int(_ad_aid_row.iloc[0]["id"])
-        _ad_acct_where = f"AND a.account_id = {_ad_acct_id}"
-
-    _ad_from_str = _ad_from.isoformat()
-    _ad_to_str = _ad_to.isoformat()
-    _ad_date_where = f"AND a.ad_date BETWEEN '{_ad_from_str}' AND '{_ad_to_str}'"
-
-    # ── 데이터 존재 확인 ──
-    _ad_count = query_df(f"""
-        SELECT COUNT(*) as cnt FROM ad_spends a
-        WHERE 1=1 {_ad_acct_where} {_ad_date_where}
-    """)
-    _ad_total_rows = int(_ad_count.iloc[0]["cnt"]) if not _ad_count.empty else 0
-
-    if _ad_total_rows == 0:
-        st.info("해당 기간 광고 데이터가 없습니다. Excel 파일을 업로드해주세요.")
-        st.stop()
-
-    # ── KPI 카드 4개 ──
-    _ad_kpi = query_df(f"""
-        SELECT
-            COALESCE(SUM(a.billable_cost), 0) as total_cost,
-            COUNT(DISTINCT a.ad_date) as active_days,
-            COALESCE(SUM(a.vat_amount), 0) as total_vat,
-            COALESCE(SUM(a.total_charge), 0) as total_charge
-        FROM ad_spends a
-        WHERE 1=1 {_ad_acct_where} {_ad_date_where}
-    """)
-    _adk = _ad_kpi.iloc[0]
-    _ad_total_cost = int(_adk["total_cost"])
-    _ad_active_days = int(_adk["active_days"])
-    _ad_daily_avg = _ad_total_cost // max(_ad_active_days, 1)
-
-    # 매출 데이터 크로스 (revenue_history)
-    _ad_rev_where = _ad_acct_where.replace("a.account_id", "r.account_id")
-    _ad_rev = query_df(f"""
-        SELECT
-            COALESCE(SUM(CASE WHEN r.sale_type='SALE' THEN r.sale_amount ELSE -r.sale_amount END), 0) as revenue,
-            COALESCE(SUM(CASE WHEN r.sale_type='SALE' THEN r.settlement_amount ELSE -r.settlement_amount END), 0) as settlement
-        FROM revenue_history r
-        WHERE r.recognition_date BETWEEN '{_ad_from_str}' AND '{_ad_to_str}'
-            {_ad_rev_where}
-    """)
-    _ad_revenue = int(_ad_rev.iloc[0]["revenue"]) if not _ad_rev.empty else 0
-    _ad_settlement = int(_ad_rev.iloc[0]["settlement"]) if not _ad_rev.empty else 0
-    _ad_roas = round(_ad_revenue / _ad_total_cost, 2) if _ad_total_cost > 0 else 0
-    _ad_profit = _ad_settlement - _ad_total_cost
-
-    adk1, adk2, adk3, adk4 = st.columns(4)
-    adk1.metric("총 광고비", _fmt_krw_ad(_ad_total_cost))
-    adk2.metric("일평균 광고비", _fmt_krw_ad(_ad_daily_avg),
-                delta=f"{_ad_active_days}일 운영")
-    adk3.metric("ROAS", f"{_ad_roas:.1f}x" if _ad_roas > 0 else "-",
-                delta=f"매출 {_fmt_krw_ad(_ad_revenue)}" if _ad_revenue > 0 else "매출 데이터 없음",
-                delta_color="normal")
-    adk4.metric("순이익", _fmt_krw_ad(_ad_profit) if _ad_settlement > 0 else "-",
-                delta=f"정산 {_fmt_krw_ad(_ad_settlement)}" if _ad_settlement > 0 else "정산 데이터 없음",
-                delta_color="normal" if _ad_profit >= 0 else "inverse")
-
-    st.caption(f"기간: {_ad_from_str} ~ {_ad_to_str} | 데이터 {_ad_total_rows}건")
-
-    # ── 일별 추이 차트 ──
-    _ad_daily = query_df(f"""
-        SELECT a.ad_date as 날짜,
-               SUM(a.billable_cost) as 광고비
-        FROM ad_spends a
-        WHERE 1=1 {_ad_acct_where} {_ad_date_where}
-        GROUP BY a.ad_date ORDER BY a.ad_date
-    """)
-
-    _ad_rev_daily = query_df(f"""
-        SELECT r.recognition_date as 날짜,
-               SUM(CASE WHEN r.sale_type='SALE' THEN r.sale_amount ELSE -r.sale_amount END) as 매출
-        FROM revenue_history r
-        WHERE r.recognition_date BETWEEN '{_ad_from_str}' AND '{_ad_to_str}'
-            {_ad_rev_where}
-        GROUP BY r.recognition_date ORDER BY r.recognition_date
-    """)
-
-    if not _ad_daily.empty:
-        _ad_chart = _ad_daily.copy()
-        _ad_chart["날짜"] = pd.to_datetime(_ad_chart["날짜"])
-        if not _ad_rev_daily.empty:
-            _ad_rev_daily["날짜"] = pd.to_datetime(_ad_rev_daily["날짜"])
-            _ad_chart = _ad_chart.merge(_ad_rev_daily, on="날짜", how="outer").sort_values("날짜")
-            _ad_chart = _ad_chart.fillna(0)
-
-        import plotly.graph_objects as go
-        _fig_ad = go.Figure()
-        _fig_ad.add_trace(go.Bar(
-            x=_ad_chart["날짜"], y=_ad_chart["광고비"],
-            name="광고비", marker_color="#FF6B6B", opacity=0.7
-        ))
-        if "매출" in _ad_chart.columns:
-            _fig_ad.add_trace(go.Scatter(
-                x=_ad_chart["날짜"], y=_ad_chart["매출"],
-                name="매출", mode="lines+markers",
-                line=dict(color="#4ECDC4", width=2)
-            ))
-        _fig_ad.update_layout(
-            title="일별 광고비 vs 매출",
-            xaxis_title="날짜", yaxis_title="금액 (원)",
-            barmode="overlay", height=400,
-            margin=dict(t=40, b=40, l=60, r=20),
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-        )
-        st.plotly_chart(_fig_ad, use_container_width=True)
-
-    st.divider()
-
-    # ── 하단 탭 3개 ──
-    ad_tab1, ad_tab2, ad_tab3 = st.tabs(["📅 일별 상세", "🎯 캠페인별", "📊 ROI 분석"])
-
-    with ad_tab1:
-        _ad_detail = query_df(f"""
-            SELECT a.ad_date as 날짜,
-                   act.account_name as 계정,
-                   SUM(a.billable_cost) as 광고비,
-                   SUM(a.vat_amount) as 부가세,
-                   SUM(a.total_charge) as 총청구,
-                   COALESCE(r.매출, 0) as 매출,
-                   COALESCE(r.정산, 0) as 정산,
-                   CASE WHEN SUM(a.billable_cost) > 0
-                        THEN ROUND(COALESCE(r.매출, 0) * 1.0 / SUM(a.billable_cost), 2)
-                        ELSE 0 END as ROAS
-            FROM ad_spends a
-            JOIN accounts act ON a.account_id = act.id
-            LEFT JOIN (
-                SELECT recognition_date as rd, account_id as aid,
-                       SUM(CASE WHEN sale_type='SALE' THEN sale_amount ELSE -sale_amount END) as 매출,
-                       SUM(CASE WHEN sale_type='SALE' THEN settlement_amount ELSE -settlement_amount END) as 정산
-                FROM revenue_history
-                GROUP BY recognition_date, account_id
-            ) r ON a.ad_date = r.rd AND a.account_id = r.aid
-            WHERE 1=1 {_ad_acct_where} {_ad_date_where}
-            GROUP BY a.ad_date, a.account_id
-            ORDER BY a.ad_date DESC
-        """)
-        if not _ad_detail.empty:
-            st.caption(f"총 {len(_ad_detail)}건")
-            _ad_money_kw = ["광고비", "부가세", "총청구", "매출", "정산"]
-            _disp = _ad_detail.copy()
-            for _mk in _ad_money_kw:
-                if _mk in _disp.columns and pd.api.types.is_numeric_dtype(_disp[_mk]):
-                    _disp[_mk] = _disp[_mk].apply(lambda x: f"{int(x):,}" if pd.notna(x) else "0")
-            st.dataframe(_disp, width="stretch", hide_index=True)
-            _csv_ad = _ad_detail.to_csv(index=False).encode("utf-8-sig")
-            st.download_button("CSV 다운로드", _csv_ad, "ad_daily_detail.csv", "text/csv", key="dl_ad_daily")
-        else:
-            st.info("일별 상세 데이터가 없습니다.")
-
-    with ad_tab2:
-        _ad_camp = query_df(f"""
-            SELECT a.campaign_id as 캠페인ID,
-                   a.campaign_name as 캠페인명,
-                   a.ad_type as 광고유형,
-                   a.ad_objective as 광고목표,
-                   SUM(a.billable_cost) as 총광고비,
-                   COUNT(DISTINCT a.ad_date) as 운영일수,
-                   ROUND(SUM(a.billable_cost) * 1.0 / COUNT(DISTINCT a.ad_date)) as 일평균광고비,
-                   SUM(a.daily_budget) as 총예산,
-                   MIN(a.ad_date) as 시작일,
-                   MAX(a.ad_date) as 종료일
-            FROM ad_spends a
-            WHERE 1=1 {_ad_acct_where} {_ad_date_where}
-            GROUP BY a.campaign_id, a.campaign_name, a.ad_type, a.ad_objective
-            ORDER BY 총광고비 DESC
-        """)
-        if not _ad_camp.empty:
-            _camp_money = ["총광고비", "일평균광고비", "총예산"]
-            _camp_disp = _ad_camp.copy()
-            for _mk in _camp_money:
-                if _mk in _camp_disp.columns and pd.api.types.is_numeric_dtype(_camp_disp[_mk]):
-                    _camp_disp[_mk] = _camp_disp[_mk].apply(lambda x: f"{int(x):,}" if pd.notna(x) else "0")
-            st.dataframe(_camp_disp, width="stretch", hide_index=True)
-        else:
-            st.info("캠페인 데이터가 없습니다.")
-
-    with ad_tab3:
-        # ROI 분석: 광고비 대비 매출/정산 효율
-        st.subheader("광고 효율 요약")
-
-        _roi_c1, _roi_c2, _roi_c3 = st.columns(3)
-        with _roi_c1:
-            st.metric("총 광고비 (VAT 제외)", _fmt_krw_ad(_ad_total_cost))
-        with _roi_c2:
-            _ad_cost_ratio = round(_ad_total_cost / _ad_revenue * 100, 1) if _ad_revenue > 0 else 0
-            st.metric("광고비/매출 비율", f"{_ad_cost_ratio}%" if _ad_cost_ratio > 0 else "-")
-        with _roi_c3:
-            _ad_profit_margin = round(_ad_profit / _ad_revenue * 100, 1) if _ad_revenue > 0 else 0
-            st.metric("순이익률", f"{_ad_profit_margin}%" if _ad_revenue > 0 else "-",
-                      delta_color="normal" if _ad_profit_margin >= 0 else "inverse")
-
-        # 요일별 패턴
-        st.subheader("요일별 광고비 패턴")
-        _ad_dow = query_df(f"""
-            SELECT
-                CASE CAST(strftime('%w', a.ad_date) AS INTEGER)
-                    WHEN 0 THEN '일'
-                    WHEN 1 THEN '월'
-                    WHEN 2 THEN '화'
-                    WHEN 3 THEN '수'
-                    WHEN 4 THEN '목'
-                    WHEN 5 THEN '금'
-                    WHEN 6 THEN '토'
-                END as 요일,
-                CAST(strftime('%w', a.ad_date) AS INTEGER) as dow_num,
-                ROUND(AVG(a.billable_cost)) as 평균광고비,
-                COUNT(*) as 건수
-            FROM ad_spends a
-            WHERE 1=1 {_ad_acct_where} {_ad_date_where}
-            GROUP BY dow_num
-            ORDER BY dow_num
-        """)
-        if not _ad_dow.empty:
-            import plotly.express as px
-            _fig_dow = px.bar(
-                _ad_dow, x="요일", y="평균광고비",
-                title="요일별 평균 광고비",
-                color="평균광고비",
-                color_continuous_scale="RdYlGn_r"
-            )
-            _fig_dow.update_layout(height=300, margin=dict(t=40, b=40))
-            st.plotly_chart(_fig_dow, use_container_width=True)
-
-        # 요일별 매출/광고비 교차
-        _ad_dow_rev = query_df(f"""
-            SELECT
-                CASE CAST(strftime('%w', a.ad_date) AS INTEGER)
-                    WHEN 0 THEN '일'
-                    WHEN 1 THEN '월'
-                    WHEN 2 THEN '화'
-                    WHEN 3 THEN '수'
-                    WHEN 4 THEN '목'
-                    WHEN 5 THEN '금'
-                    WHEN 6 THEN '토'
-                END as 요일,
-                CAST(strftime('%w', a.ad_date) AS INTEGER) as dow_num,
-                ROUND(AVG(a.billable_cost)) as 평균광고비,
-                ROUND(AVG(COALESCE(r.매출, 0))) as 평균매출,
-                CASE WHEN AVG(a.billable_cost) > 0
-                     THEN ROUND(AVG(COALESCE(r.매출, 0)) / AVG(a.billable_cost), 2)
-                     ELSE 0 END as 평균ROAS
-            FROM ad_spends a
-            LEFT JOIN (
-                SELECT recognition_date as rd, account_id as aid,
-                       SUM(CASE WHEN sale_type='SALE' THEN sale_amount ELSE -sale_amount END) as 매출
-                FROM revenue_history
-                GROUP BY recognition_date, account_id
-            ) r ON a.ad_date = r.rd AND a.account_id = r.aid
-            WHERE 1=1 {_ad_acct_where} {_ad_date_where}
-            GROUP BY dow_num
-            ORDER BY dow_num
-        """)
-        if not _ad_dow_rev.empty:
-            _dow_disp = _ad_dow_rev[["요일", "평균광고비", "평균매출", "평균ROAS"]].copy()
-            for _mk in ["평균광고비", "평균매출"]:
-                if _mk in _dow_disp.columns:
-                    _dow_disp[_mk] = _dow_disp[_mk].apply(lambda x: f"{int(x):,}" if pd.notna(x) else "0")
-            st.dataframe(_dow_disp, width="stretch", hide_index=True)
-
-
-# ═══════════════════════════════════════
 # 주문 관리
 # ═══════════════════════════════════════
 elif page == "주문":
@@ -4020,5 +4004,842 @@ elif page == "주문":
                             st.error("WING API 클라이언트를 생성할 수 없습니다.")
 
 
+# ═══════════════════════════════════════
+# 반품 관리
+# ═══════════════════════════════════════
+elif page == "반품":
+    st.title("반품 관리")
+
+    from datetime import date, timedelta
+
+    # ── 상단 컨트롤 ──
+    _ret_ctrl1, _ret_ctrl2, _ret_ctrl3, _ret_ctrl4 = st.columns([2, 2, 2, 2])
+    with _ret_ctrl1:
+        _ret_acct = st.selectbox("계정", ["전체"] + account_names, key="ret_acct")
+    with _ret_ctrl2:
+        _ret_period = st.selectbox("기간", ["7일", "14일", "30일", "60일", "90일"], index=2, key="ret_period")
+    with _ret_ctrl3:
+        _ret_status_filter = st.selectbox("상태", [
+            "전체", "RELEASE_STOP_UNCHECKED", "RETURNS_UNCHECKED",
+            "VENDOR_WAREHOUSE_CONFIRM", "REQUEST_COUPANG_CHECK", "RETURNS_COMPLETED"
+        ], key="ret_status")
+    with _ret_ctrl4:
+        st.markdown("<br>", unsafe_allow_html=True)
+        _btn_ret_sync = st.button("반품 동기화", type="primary", key="btn_ret_sync", use_container_width=True)
+
+    # 기간 계산
+    _ret_days = int(_ret_period.replace("일", ""))
+    _ret_date_to = date.today()
+    _ret_date_from = _ret_date_to - timedelta(days=_ret_days)
+    _ret_date_from_str = _ret_date_from.isoformat()
+    _ret_date_to_str = _ret_date_to.isoformat()
+
+    # WHERE 절 구성
+    _ret_acct_where = ""
+    _ret_acct_params = {}
+    if _ret_acct != "전체":
+        _ret_acct_where = "AND r.account_id = (SELECT id FROM accounts WHERE account_name = :acct_name)"
+        _ret_acct_params["acct_name"] = _ret_acct
+
+    _ret_status_where = ""
+    if _ret_status_filter != "전체":
+        _ret_status_where = f"AND r.receipt_status = '{_ret_status_filter}'"
+
+    _ret_date_where = f"AND r.created_at_api >= '{_ret_date_from_str}' AND r.created_at_api <= '{_ret_date_to_str} 23:59:59'"
+
+    # 동기화 실행
+    if _btn_ret_sync:
+        with st.spinner("반품 데이터 동기화 중..."):
+            try:
+                from scripts.sync_returns import ReturnSync
+                _ret_syncer = ReturnSync()
+                _sync_acct = _ret_acct if _ret_acct != "전체" else None
+                _ret_progress = st.progress(0, text="동기화 시작...")
+                def _ret_progress_cb(current, total, msg):
+                    if total > 0:
+                        _ret_progress.progress(min(current / total, 1.0), text=msg)
+                _ret_results = _ret_syncer.sync_all(
+                    days=_ret_days,
+                    account_name=_sync_acct,
+                    progress_callback=_ret_progress_cb,
+                )
+                _total_f = sum(r["fetched"] for r in _ret_results)
+                _total_u = sum(r["upserted"] for r in _ret_results)
+                st.success(f"동기화 완료! 조회 {_total_f:,}건, 저장 {_total_u:,}건")
+                st.cache_data.clear()
+            except Exception as e:
+                st.error(f"동기화 오류: {e}")
+
+    # ── 테이블 존재 확인 ──
+    _ret_table_exists = False
+    try:
+        _ret_check = query_df("SELECT name FROM sqlite_master WHERE type='table' AND name='return_requests'")
+        _ret_table_exists = not _ret_check.empty
+    except Exception:
+        pass
+
+    if not _ret_table_exists:
+        st.info("return_requests 테이블이 없습니다. '반품 동기화' 버튼을 눌러 데이터를 가져오세요.")
+    else:
+        # ── KPI 카드 ──
+        _ret_kpi_base = f"""
+            FROM return_requests r
+            WHERE 1=1 {_ret_acct_where} {_ret_date_where}
+        """
+
+        _ret_total = int(query_df(f"SELECT COUNT(*) as c {_ret_kpi_base}", _ret_acct_params).iloc[0]["c"])
+        _ret_pending = int(query_df(f"SELECT COUNT(*) as c {_ret_kpi_base} AND r.receipt_status IN ('RELEASE_STOP_UNCHECKED', 'RETURNS_UNCHECKED')", _ret_acct_params).iloc[0]["c"])
+        _ret_completed = int(query_df(f"SELECT COUNT(*) as c {_ret_kpi_base} AND r.receipt_status = 'RETURNS_COMPLETED'", _ret_acct_params).iloc[0]["c"])
+
+        # 귀책 비율
+        _ret_fault = query_df(f"""
+            SELECT
+                SUM(CASE WHEN r.fault_by_type IN ('CUSTOMER') THEN 1 ELSE 0 END) as 고객귀책,
+                SUM(CASE WHEN r.fault_by_type IN ('VENDOR') THEN 1 ELSE 0 END) as 셀러귀책,
+                COUNT(*) as 전체
+            {_ret_kpi_base}
+        """, _ret_acct_params)
+        _ret_customer_fault = int(_ret_fault.iloc[0]["고객귀책"]) if not _ret_fault.empty else 0
+        _ret_vendor_fault = int(_ret_fault.iloc[0]["셀러귀책"]) if not _ret_fault.empty else 0
+        _ret_fault_total = _ret_customer_fault + _ret_vendor_fault
+        _ret_fault_text = f"고객 {_ret_customer_fault} / 셀러 {_ret_vendor_fault}" if _ret_fault_total > 0 else "-"
+
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("총 반품/취소", f"{_ret_total:,}건")
+        k2.metric("미처리 건수", f"{_ret_pending:,}건")
+        k3.metric("처리완료", f"{_ret_completed:,}건")
+        k4.metric("귀책 (고객/셀러)", _ret_fault_text)
+
+        st.divider()
+
+        # ── 일별 추이 차트 ──
+        _ret_daily = query_df(f"""
+            SELECT DATE(r.created_at_api) as 날짜,
+                   COUNT(*) as 건수,
+                   COALESCE(SUM(r.return_shipping_charge), 0) as 배송비부담
+            {_ret_kpi_base}
+            GROUP BY DATE(r.created_at_api)
+            ORDER BY 날짜
+        """, _ret_acct_params)
+
+        if not _ret_daily.empty:
+            import plotly.graph_objects as go
+            from plotly.subplots import make_subplots
+
+            _ret_fig = make_subplots(specs=[[{"secondary_y": True}]])
+            _ret_fig.add_trace(
+                go.Bar(x=_ret_daily["날짜"], y=_ret_daily["건수"], name="반품 건수", marker_color="#EF553B"),
+                secondary_y=False,
+            )
+            _ret_fig.add_trace(
+                go.Scatter(x=_ret_daily["날짜"], y=_ret_daily["배송비부담"], name="배송비 부담액",
+                           line=dict(color="#636EFA", width=2)),
+                secondary_y=True,
+            )
+            _ret_fig.update_layout(
+                title="일별 반품 추이",
+                height=350,
+                margin=dict(l=20, r=20, t=40, b=20),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            )
+            _ret_fig.update_yaxes(title_text="건수", secondary_y=False)
+            _ret_fig.update_yaxes(title_text="배송비 (원)", secondary_y=True)
+            st.plotly_chart(_ret_fig, use_container_width=True)
+
+        st.divider()
+
+        # ── 4개 탭 ──
+        _ret_tab1, _ret_tab2, _ret_tab3, _ret_tab4 = st.tabs(["반품 목록", "반품 처리", "사유 분석", "회수 관리"])
+
+        # ── 탭1: 반품 목록 ──
+        with _ret_tab1:
+            _ret_list = query_df(f"""
+                SELECT
+                    a.account_name as 계정,
+                    r.receipt_id as 접수번호,
+                    r.order_id as 주문번호,
+                    r.receipt_type as 유형,
+                    r.receipt_status as 상태,
+                    DATE(r.created_at_api) as 접수일,
+                    r.cancel_reason_category1 as 사유분류,
+                    r.cancel_reason as 사유,
+                    r.cancel_count_sum as 수량,
+                    COALESCE(r.return_shipping_charge, 0) as 배송비,
+                    r.fault_by_type as 귀책,
+                    r.requester_name as 요청자
+                FROM return_requests r
+                JOIN accounts a ON r.account_id = a.id
+                WHERE 1=1 {_ret_acct_where} {_ret_status_where} {_ret_date_where}
+                ORDER BY r.created_at_api DESC
+                LIMIT 500
+            """, _ret_acct_params)
+
+            if _ret_list.empty:
+                st.info("해당 조건의 반품/취소 건이 없습니다.")
+            else:
+                # 상태 한글 매핑
+                _ret_status_map = {
+                    "RELEASE_STOP_UNCHECKED": "출고중지요청",
+                    "RETURNS_UNCHECKED": "반품접수(미확인)",
+                    "VENDOR_WAREHOUSE_CONFIRM": "입고확인",
+                    "REQUEST_COUPANG_CHECK": "쿠팡확인요청",
+                    "RETURNS_COMPLETED": "반품완료",
+                }
+                _ret_list["상태"] = _ret_list["상태"].map(lambda x: _ret_status_map.get(x, x))
+
+                _ret_type_map = {"RETURN": "반품", "CANCEL": "취소"}
+                _ret_list["유형"] = _ret_list["유형"].map(lambda x: _ret_type_map.get(x, x))
+
+                _ret_fault_map = {
+                    "CUSTOMER": "고객", "VENDOR": "셀러", "COUPANG": "쿠팡",
+                    "WMS": "WMS", "GENERAL": "일반",
+                }
+                _ret_list["귀책"] = _ret_list["귀책"].map(lambda x: _ret_fault_map.get(x, x) if x else "-")
+
+                if "배송비" in _ret_list.columns:
+                    _ret_list["배송비"] = _ret_list["배송비"].apply(lambda x: f"{int(x):,}" if pd.notna(x) else "0")
+
+                gb = GridOptionsBuilder.from_dataframe(_ret_list)
+                gb.configure_pagination(paginationAutoPageSize=False, paginationPageSize=20)
+                gb.configure_default_column(resizable=True, sorteable=True, filterable=True)
+                gb.configure_column("사유", width=250)
+                grid_opts = gb.build()
+                AgGrid(_ret_list, gridOptions=grid_opts, height=500, theme="streamlit")
+
+                st.download_button(
+                    "CSV 다운로드",
+                    _ret_list.to_csv(index=False, encoding="utf-8-sig"),
+                    file_name=f"returns_{_ret_date_from_str}_{_ret_date_to_str}.csv",
+                    mime="text/csv",
+                    key="ret_csv_dl",
+                )
+
+        # ── 탭2: 반품 처리 ──
+        with _ret_tab2:
+            if selected_account is None:
+                st.warning("사이드바에서 계정을 선택하세요.")
+            else:
+                _ret_mgmt_aid = int(selected_account["id"])
+                _ret_mgmt_client = create_wing_client(selected_account)
+
+                # 미처리 반품 목록
+                st.subheader("입고 확인 대기")
+                st.caption("RETURNS_UNCHECKED 상태의 반품에 대해 입고 확인 처리합니다.")
+
+                _ret_unchecked = query_df("""
+                    SELECT r.receipt_id as 접수번호,
+                           r.order_id as 주문번호,
+                           r.receipt_type as 유형,
+                           r.cancel_reason_category1 as 사유,
+                           r.cancel_count_sum as 수량,
+                           r.fault_by_type as 귀책,
+                           DATE(r.created_at_api) as 접수일
+                    FROM return_requests r
+                    WHERE r.account_id = :aid
+                          AND r.receipt_status = 'RETURNS_UNCHECKED'
+                    ORDER BY r.created_at_api
+                """, {"aid": _ret_mgmt_aid})
+
+                if _ret_unchecked.empty:
+                    st.info("입고 확인 대기 중인 반품이 없습니다.")
+                else:
+                    st.dataframe(_ret_unchecked, width="stretch", hide_index=True)
+
+                    _ret_confirm_col1, _ret_confirm_col2 = st.columns(2)
+                    with _ret_confirm_col1:
+                        _sel_receipt_confirm = st.selectbox(
+                            "접수번호 선택 (입고확인)",
+                            _ret_unchecked["접수번호"].tolist(),
+                            key="sel_receipt_confirm"
+                        )
+                    with _ret_confirm_col2:
+                        st.markdown("<br>", unsafe_allow_html=True)
+                        if st.button("입고 확인", type="primary", key="btn_confirm_receipt"):
+                            if _ret_mgmt_client:
+                                try:
+                                    _ret_mgmt_client.confirm_return_receipt(int(_sel_receipt_confirm))
+                                    # DB 상태 업데이트
+                                    with engine.connect() as conn:
+                                        conn.execute(text(
+                                            "UPDATE return_requests SET receipt_status = 'VENDOR_WAREHOUSE_CONFIRM', updated_at = :now WHERE account_id = :aid AND receipt_id = :rid"
+                                        ), {"now": datetime.utcnow().isoformat(), "aid": _ret_mgmt_aid, "rid": int(_sel_receipt_confirm)})
+                                        conn.commit()
+                                    st.success(f"입고 확인 완료: 접수번호 {_sel_receipt_confirm}")
+                                    st.cache_data.clear()
+                                except CoupangWingError as e:
+                                    st.error(f"API 오류: {e}")
+                            else:
+                                st.error("WING API 클라이언트를 생성할 수 없습니다.")
+
+                st.divider()
+
+                # 반품 승인 대기
+                st.subheader("반품 승인 대기")
+                st.caption("VENDOR_WAREHOUSE_CONFIRM 상태의 반품을 승인 처리합니다.")
+
+                _ret_confirm_list = query_df("""
+                    SELECT r.receipt_id as 접수번호,
+                           r.order_id as 주문번호,
+                           r.receipt_type as 유형,
+                           r.cancel_reason_category1 as 사유,
+                           r.cancel_count_sum as 수량,
+                           r.fault_by_type as 귀책,
+                           DATE(r.created_at_api) as 접수일
+                    FROM return_requests r
+                    WHERE r.account_id = :aid
+                          AND r.receipt_status = 'VENDOR_WAREHOUSE_CONFIRM'
+                    ORDER BY r.created_at_api
+                """, {"aid": _ret_mgmt_aid})
+
+                if _ret_confirm_list.empty:
+                    st.info("승인 대기 중인 반품이 없습니다.")
+                else:
+                    st.dataframe(_ret_confirm_list, width="stretch", hide_index=True)
+
+                    _ret_approve_col1, _ret_approve_col2 = st.columns(2)
+                    with _ret_approve_col1:
+                        _sel_receipt_approve = st.selectbox(
+                            "접수번호 선택 (승인)",
+                            _ret_confirm_list["접수번호"].tolist(),
+                            key="sel_receipt_approve"
+                        )
+                    with _ret_approve_col2:
+                        st.markdown("<br>", unsafe_allow_html=True)
+                        if st.button("반품 승인", type="primary", key="btn_approve_return"):
+                            if _ret_mgmt_client:
+                                try:
+                                    _ret_mgmt_client.approve_return_request(int(_sel_receipt_approve))
+                                    with engine.connect() as conn:
+                                        conn.execute(text(
+                                            "UPDATE return_requests SET receipt_status = 'RETURNS_COMPLETED', updated_at = :now WHERE account_id = :aid AND receipt_id = :rid"
+                                        ), {"now": datetime.utcnow().isoformat(), "aid": _ret_mgmt_aid, "rid": int(_sel_receipt_approve)})
+                                        conn.commit()
+                                    st.success(f"반품 승인 완료: 접수번호 {_sel_receipt_approve}")
+                                    st.cache_data.clear()
+                                except CoupangWingError as e:
+                                    st.error(f"API 오류: {e}")
+                            else:
+                                st.error("WING API 클라이언트를 생성할 수 없습니다.")
+
+        # ── 탭3: 사유 분석 ──
+        with _ret_tab3:
+            _ret_by_reason = query_df(f"""
+                SELECT
+                    COALESCE(r.cancel_reason_category1, '미분류') as 사유분류,
+                    COUNT(*) as 건수
+                {_ret_kpi_base}
+                GROUP BY r.cancel_reason_category1
+                ORDER BY 건수 DESC
+            """, _ret_acct_params)
+
+            if not _ret_by_reason.empty:
+                import plotly.express as px
+
+                _reason_col1, _reason_col2 = st.columns(2)
+
+                with _reason_col1:
+                    _fig_reason = px.pie(_ret_by_reason, values="건수", names="사유분류", title="반품 사유별 비율")
+                    _fig_reason.update_layout(height=400, margin=dict(l=20, r=20, t=40, b=20))
+                    st.plotly_chart(_fig_reason, use_container_width=True)
+
+                with _reason_col2:
+                    _ret_by_fault = query_df(f"""
+                        SELECT
+                            COALESCE(r.fault_by_type, '미분류') as 귀책유형,
+                            COUNT(*) as 건수
+                        {_ret_kpi_base}
+                        GROUP BY r.fault_by_type
+                        ORDER BY 건수 DESC
+                    """, _ret_acct_params)
+
+                    if not _ret_by_fault.empty:
+                        _fault_map_chart = {
+                            "CUSTOMER": "고객", "VENDOR": "셀러", "COUPANG": "쿠팡",
+                            "WMS": "WMS", "GENERAL": "일반", "미분류": "미분류",
+                        }
+                        _ret_by_fault["귀책명"] = _ret_by_fault["귀책유형"].map(lambda x: _fault_map_chart.get(x, x))
+                        _fig_fault = px.pie(_ret_by_fault, values="건수", names="귀책명", title="귀책별 비율")
+                        _fig_fault.update_layout(height=400, margin=dict(l=20, r=20, t=40, b=20))
+                        st.plotly_chart(_fig_fault, use_container_width=True)
+
+                # 월별 트렌드
+                st.subheader("월별 반품 트렌드")
+                _ret_monthly = query_df(f"""
+                    SELECT
+                        STRFTIME('%Y-%m', r.created_at_api) as 월,
+                        r.receipt_type as 유형,
+                        COUNT(*) as 건수
+                    FROM return_requests r
+                    WHERE r.created_at_api IS NOT NULL
+                          {_ret_acct_where}
+                    GROUP BY STRFTIME('%Y-%m', r.created_at_api), r.receipt_type
+                    ORDER BY 월
+                """, _ret_acct_params)
+
+                if not _ret_monthly.empty:
+                    _ret_monthly["유형명"] = _ret_monthly["유형"].map(lambda x: {"RETURN": "반품", "CANCEL": "취소"}.get(x, x))
+                    _fig_monthly = px.bar(_ret_monthly, x="월", y="건수", color="유형명",
+                                          title="월별 반품/취소 추이", barmode="group")
+                    _fig_monthly.update_layout(height=350, margin=dict(l=20, r=20, t=40, b=20))
+                    st.plotly_chart(_fig_monthly, use_container_width=True)
+            else:
+                st.info("분석할 반품 데이터가 없습니다.")
+
+        # ── 탭4: 회수 관리 ──
+        with _ret_tab4:
+            if selected_account is None:
+                st.warning("사이드바에서 계정을 선택하세요.")
+            else:
+                _ret_inv_aid = int(selected_account["id"])
+                _ret_inv_client = create_wing_client(selected_account)
+
+                st.subheader("회수 송장 등록")
+                st.caption("반품 접수 건에 대해 택배사와 운송장 번호를 등록합니다.")
+
+                # 회수 송장 등록 대상 (완료 전 상태)
+                _ret_need_invoice = query_df("""
+                    SELECT r.receipt_id as 접수번호,
+                           r.order_id as 주문번호,
+                           r.receipt_status as 상태,
+                           r.cancel_reason_category1 as 사유,
+                           r.cancel_count_sum as 수량,
+                           DATE(r.created_at_api) as 접수일
+                    FROM return_requests r
+                    WHERE r.account_id = :aid
+                          AND r.receipt_type = 'RETURN'
+                          AND r.receipt_status IN ('RELEASE_STOP_UNCHECKED', 'RETURNS_UNCHECKED')
+                    ORDER BY r.created_at_api
+                """, {"aid": _ret_inv_aid})
+
+                if _ret_need_invoice.empty:
+                    st.info("회수 송장 등록 대상이 없습니다.")
+                else:
+                    _ret_status_map2 = {
+                        "RELEASE_STOP_UNCHECKED": "출고중지요청",
+                        "RETURNS_UNCHECKED": "반품접수(미확인)",
+                    }
+                    _ret_need_invoice_disp = _ret_need_invoice.copy()
+                    _ret_need_invoice_disp["상태"] = _ret_need_invoice_disp["상태"].map(lambda x: _ret_status_map2.get(x, x))
+                    st.dataframe(_ret_need_invoice_disp, width="stretch", hide_index=True)
+
+                    _inv_col1, _inv_col2, _inv_col3 = st.columns(3)
+                    with _inv_col1:
+                        _ret_sel_receipt = st.selectbox(
+                            "접수번호",
+                            _ret_need_invoice["접수번호"].tolist(),
+                            key="ret_inv_receipt"
+                        )
+                    with _inv_col2:
+                        _ret_delivery_companies = {
+                            "CJGLS": "CJ대한통운", "EPOST": "우체국택배", "HANJIN": "한진택배",
+                            "LOTTE": "롯데택배", "LOGEN": "로젠택배", "KGB": "KGB택배",
+                            "HDEXP": "합동택배",
+                        }
+                        _ret_sel_company = st.selectbox("택배사", list(_ret_delivery_companies.keys()),
+                                                         format_func=lambda x: _ret_delivery_companies[x],
+                                                         key="ret_inv_company")
+                    with _inv_col3:
+                        _ret_inv_number = st.text_input("운송장번호", key="ret_inv_number")
+
+                    if st.button("회수 송장 등록", type="primary", key="btn_ret_invoice"):
+                        if not _ret_inv_number:
+                            st.warning("운송장번호를 입력하세요.")
+                        elif _ret_inv_client:
+                            try:
+                                _ret_inv_client.create_return_invoice(
+                                    receipt_id=int(_ret_sel_receipt),
+                                    delivery_company_code=_ret_sel_company,
+                                    invoice_number=_ret_inv_number,
+                                )
+                                st.success(f"회수 송장 등록 완료: 접수번호 {_ret_sel_receipt}, {_ret_delivery_companies[_ret_sel_company]} {_ret_inv_number}")
+                                st.cache_data.clear()
+                            except CoupangWingError as e:
+                                st.error(f"API 오류: {e}")
+                        else:
+                            st.error("WING API 클라이언트를 생성할 수 없습니다.")
+
+
+# ═══════════════════════════════════════
+# 노출 전략
+# ═══════════════════════════════════════
+elif page == "노출 전략":
+    st.title("노출 전략")
+
+    # ── ad_performances 테이블 보장 ──
+    with engine.connect() as _conn:
+        _conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS ad_performances (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_id INTEGER NOT NULL REFERENCES accounts(id),
+                ad_date DATE NOT NULL,
+                campaign_id VARCHAR(50) DEFAULT '',
+                campaign_name VARCHAR(200) DEFAULT '',
+                ad_group_name VARCHAR(200) DEFAULT '',
+                coupang_product_id VARCHAR(50) DEFAULT '',
+                product_name VARCHAR(500) DEFAULT '',
+                listing_id INTEGER REFERENCES listings(id),
+                keyword VARCHAR(200) DEFAULT '',
+                match_type VARCHAR(20) DEFAULT '',
+                impressions INTEGER DEFAULT 0,
+                clicks INTEGER DEFAULT 0,
+                ctr REAL DEFAULT 0.0,
+                avg_cpc INTEGER DEFAULT 0,
+                ad_spend INTEGER DEFAULT 0,
+                direct_orders INTEGER DEFAULT 0,
+                direct_revenue INTEGER DEFAULT 0,
+                indirect_orders INTEGER DEFAULT 0,
+                indirect_revenue INTEGER DEFAULT 0,
+                total_orders INTEGER DEFAULT 0,
+                total_revenue INTEGER DEFAULT 0,
+                roas REAL DEFAULT 0.0,
+                report_type VARCHAR(20) DEFAULT 'campaign',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(account_id, ad_date, campaign_id, ad_group_name,
+                       coupang_product_id, keyword, report_type)
+            )
+        """))
+        _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_adperf_account_date ON ad_performances(account_id, ad_date)"))
+        _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_adperf_listing ON ad_performances(listing_id)"))
+        _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_adperf_product ON ad_performances(coupang_product_id)"))
+        _conn.commit()
+
+    from app.services.exposure_strategy import ExposureStrategyEngine
+    _expo_engine = ExposureStrategyEngine(engine)
+
+    def _fmt_krw_expo(val):
+        """한국식 금액 표시"""
+        val = int(val)
+        if abs(val) >= 100_000_000:
+            return f"₩{val / 100_000_000:.1f}억"
+        elif abs(val) >= 10_000:
+            return f"₩{val / 10_000:.0f}만"
+        else:
+            return f"₩{val:,}"
+
+    # ── 계정 / 기간 선택 ──
+    _expo_c1, _expo_c2 = st.columns([3, 2])
+    with _expo_c1:
+        _expo_acct = st.selectbox("계정", account_names, key="expo_acct",
+                                   index=account_names.index(selected_account_name) if selected_account_name in account_names else 0)
+    with _expo_c2:
+        _expo_period = st.selectbox("분석 기간", [7, 14, 30], index=1,
+                                     format_func=lambda x: f"최근 {x}일", key="expo_period")
+
+    # 계정 ID 조회
+    _expo_aid_df = query_df("SELECT id FROM accounts WHERE account_name = :name LIMIT 1",
+                             {"name": _expo_acct})
+    if _expo_aid_df.empty:
+        st.error("계정을 찾을 수 없습니다.")
+        st.stop()
+    _expo_aid = int(_expo_aid_df.iloc[0]["id"])
+
+    # ── KPI 카드 ──
+    _expo_active_cnt = int(query_df(
+        "SELECT COUNT(*) as c FROM listings WHERE account_id = :aid AND coupang_status = 'active'",
+        {"aid": _expo_aid}).iloc[0]["c"])
+
+    _expo_scores_df = _expo_engine.get_product_scores(_expo_aid, _expo_period)
+    _expo_avg_score = round(_expo_scores_df["overall_score"].mean(), 1) if not _expo_scores_df.empty else 0
+
+    _expo_ad_summary = _expo_engine.get_ad_summary(_expo_aid, _expo_period)
+
+    _expo_stock_warn = int(query_df(
+        "SELECT COUNT(*) as c FROM listings WHERE account_id = :aid AND coupang_status = 'active' AND stock_quantity <= 5",
+        {"aid": _expo_aid}).iloc[0]["c"])
+
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric("활성 상품", f"{_expo_active_cnt}개")
+    k2.metric("평균 점수", f"{_expo_avg_score}점",
+              delta=f"{'A' if _expo_avg_score >= 80 else 'B' if _expo_avg_score >= 60 else 'C' if _expo_avg_score >= 40 else 'D'}등급")
+    k3.metric("총 광고비", _fmt_krw_expo(_expo_ad_summary["total_spend"]) if _expo_ad_summary["has_data"] else "-")
+    k4.metric("평균 ROAS", f"{_expo_ad_summary['roas']:.0f}%" if _expo_ad_summary["has_data"] else "-")
+    k5.metric("재고 경고", f"{_expo_stock_warn}건",
+              delta=f"{_expo_stock_warn}" if _expo_stock_warn > 0 else None,
+              delta_color="inverse")
+
+    # ── 인사이트 ──
+    _expo_insights = _expo_engine.get_insights(_expo_aid, _expo_period)
+    if _expo_insights:
+        _insight_text = " | ".join(_expo_insights[:3])
+        st.info(f"📊 **인사이트:** {_insight_text}")
+
+    st.divider()
+
+    # ── 탭 4개 ──
+    _expo_tab1, _expo_tab2, _expo_tab3, _expo_tab4 = st.tabs([
+        "📊 상품 스코어보드", "🎯 광고 성과", "⚡ 액션 아이템", "📈 기간 비교"
+    ])
+
+    # ──────── Tab 1: 상품 스코어보드 ────────
+    with _expo_tab1:
+        if _expo_scores_df.empty:
+            st.info("활성 상품이 없습니다.")
+        else:
+            _expo_sort = st.radio("정렬", ["점수 낮은 순 (개선 필요)", "점수 높은 순"],
+                                   horizontal=True, key="expo_sort")
+            _sort_asc = _expo_sort.startswith("점수 낮은")
+
+            _disp_scores = _expo_scores_df[[
+                "product_name", "grade", "overall_score",
+                "sales_velocity_score", "ad_efficiency_score",
+                "stock_health_score", "shipping_score", "top_action"
+            ]].copy()
+            _disp_scores.columns = [
+                "상품명", "등급", "종합점수",
+                "판매속도", "광고효율", "재고건강", "배송경쟁력", "추천 액션"
+            ]
+            _disp_scores = _disp_scores.sort_values("종합점수", ascending=_sort_asc).reset_index(drop=True)
+
+            # 등급별 색상 스타일링
+            def _grade_color(val):
+                colors = {"A": "#28a745", "B": "#8bc34a", "C": "#ffc107", "D": "#ff9800", "F": "#dc3545"}
+                bg = colors.get(val, "#6c757d")
+                return f"background-color: {bg}; color: white; font-weight: bold; text-align: center"
+
+            def _score_bar(val):
+                val = float(val)
+                if val >= 70:
+                    color = "#28a745"
+                elif val >= 40:
+                    color = "#ffc107"
+                else:
+                    color = "#dc3545"
+                return f"background: linear-gradient(90deg, {color} {val}%, transparent {val}%); color: black"
+
+            styled = _disp_scores.style.map(
+                _grade_color, subset=["등급"]
+            ).map(
+                _score_bar, subset=["종합점수", "판매속도", "광고효율", "재고건강", "배송경쟁력"]
+            )
+
+            st.dataframe(styled, use_container_width=True, hide_index=True, height=500)
+            st.caption(f"총 {len(_disp_scores)}개 상품 | 기간: 최근 {_expo_period}일")
+
+            # CSV 다운로드
+            _csv_scores = _disp_scores.to_csv(index=False).encode("utf-8-sig")
+            st.download_button("CSV 다운로드", _csv_scores, "product_scores.csv", "text/csv", key="dl_expo_scores")
+
+    # ──────── Tab 2: 광고 성과 ────────
+    with _expo_tab2:
+        # Excel 업로드 영역
+        st.subheader("광고 보고서 업로드")
+        _expo_ad_file = st.file_uploader(
+            "쿠팡 광고센터 보고서 (상품/키워드/캠페인)", type=["xlsx"],
+            key="expo_ad_upload", help="광고센터 → 보고서 다운로드 → Excel 파일 업로드"
+        )
+
+        if _expo_ad_file is not None:
+            import tempfile
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx",
+                                              prefix=_expo_ad_file.name.replace(".xlsx", "_")) as tmp:
+                tmp.write(_expo_ad_file.read())
+                _tmp_path = tmp.name
+
+            try:
+                from scripts.sync_ad_performance import AdPerformanceSync
+                _perf_syncer = AdPerformanceSync(db_path=str(DB_PATH))
+                _perf_result = _perf_syncer.sync_file(_tmp_path, account_id=_expo_aid)
+
+                if _perf_result.get("error"):
+                    st.error(f"업로드 오류: {_perf_result['error']}")
+                else:
+                    types_str = ", ".join(_perf_result.get("report_types", []))
+                    st.success(
+                        f"업로드 완료: {_perf_result['account']} | {_perf_result['period']} | "
+                        f"{types_str} | 파싱 {_perf_result['parsed']}건, 저장 {_perf_result['saved']}건"
+                    )
+                    query_df.clear()
+            except Exception as e:
+                st.error(f"파싱 오류: {e}")
+                logger.exception("광고 성과 Excel 파싱 오류")
+            finally:
+                os.unlink(_tmp_path)
+
+        st.divider()
+
+        # 광고 데이터 요약
+        if _expo_ad_summary["has_data"]:
+            st.subheader("광고 성과 요약")
+            _ad_k1, _ad_k2, _ad_k3, _ad_k4 = st.columns(4)
+            _ad_k1.metric("총 노출", f"{_expo_ad_summary['total_impressions']:,}")
+            _ad_k2.metric("총 클릭", f"{_expo_ad_summary['total_clicks']:,}")
+            _ad_k3.metric("평균 CTR", f"{_expo_ad_summary['avg_ctr']:.2f}%")
+            _ad_k4.metric("ROAS", f"{_expo_ad_summary['roas']:.0f}%")
+
+            # 상품별 광고 랭킹
+            _ad_prod_rank = _expo_engine.get_ad_product_ranking(_expo_aid, _expo_period)
+            if not _ad_prod_rank.empty:
+                st.subheader("상품별 광고 성과 랭킹")
+                _ad_prod_disp = _ad_prod_rank.copy()
+                for _mk in ["광고비", "매출"]:
+                    if _mk in _ad_prod_disp.columns and pd.api.types.is_numeric_dtype(_ad_prod_disp[_mk]):
+                        _ad_prod_disp[_mk] = _ad_prod_disp[_mk].apply(lambda x: f"{int(x):,}" if pd.notna(x) else "0")
+                st.dataframe(_ad_prod_disp, use_container_width=True, hide_index=True)
+
+            # 키워드별 효율
+            _ad_kw_rank = _expo_engine.get_ad_keyword_ranking(_expo_aid, _expo_period)
+            if not _ad_kw_rank.empty:
+                st.subheader("키워드별 광고 성과")
+                _ad_kw_disp = _ad_kw_rank.copy()
+                for _mk in ["광고비", "매출"]:
+                    if _mk in _ad_kw_disp.columns and pd.api.types.is_numeric_dtype(_ad_kw_disp[_mk]):
+                        _ad_kw_disp[_mk] = _ad_kw_disp[_mk].apply(lambda x: f"{int(x):,}" if pd.notna(x) else "0")
+                st.dataframe(_ad_kw_disp, use_container_width=True, hide_index=True)
+        else:
+            st.info("광고 성과 데이터가 없습니다. 위에서 광고 보고서 Excel을 업로드해주세요.")
+
+    # ──────── Tab 3: 액션 아이템 ────────
+    with _expo_tab3:
+        _expo_actions = _expo_engine.get_action_items(_expo_aid, _expo_period)
+
+        if not _expo_actions:
+            st.info("현재 특별한 조치가 필요한 상품이 없습니다.")
+        else:
+            # 우선순위별 그룹
+            _critical = [a for a in _expo_actions if a["priority"] == "critical"]
+            _warning = [a for a in _expo_actions if a["priority"] == "warning"]
+            _opportunity = [a for a in _expo_actions if a["priority"] == "opportunity"]
+
+            st.caption(f"총 {len(_expo_actions)}건 — 🔴 긴급 {len(_critical)} | 🟡 주의 {len(_warning)} | 🟢 기회 {len(_opportunity)}")
+
+            if _critical:
+                st.markdown("### 🔴 긴급")
+                for a in _critical:
+                    _name = a["product_name"][:40] if a["product_name"] else "-"
+                    st.error(f"**{a['action']}** — {_name}\n\n{a['reason']} | {a['metric']}")
+
+            if _warning:
+                st.markdown("### 🟡 주의")
+                for a in _warning:
+                    _name = a["product_name"][:40] if a["product_name"] else "-"
+                    st.warning(f"**{a['action']}** — {_name}\n\n{a['reason']} | {a['metric']}")
+
+            if _opportunity:
+                st.markdown("### 🟢 기회")
+                for a in _opportunity:
+                    _name = a["product_name"][:40] if a["product_name"] else "-"
+                    st.success(f"**{a['action']}** — {_name}\n\n{a['reason']} | {a['metric']}")
+
+    # ──────── Tab 4: 기간 비교 ────────
+    with _expo_tab4:
+        from datetime import date as _expo_date, timedelta as _expo_td
+
+        _today = _expo_date.today()
+        _curr_start = _today - _expo_td(days=_expo_period)
+        _prev_start = _curr_start - _expo_td(days=_expo_period)
+
+        # 기간 비교 매출/주문
+        _comp_df = query_df("""
+            SELECT
+                COALESCE(SUM(CASE WHEN recognition_date >= :cs AND sale_type='SALE'
+                                  THEN sale_amount ELSE 0 END), 0) as 이번기간_매출,
+                COALESCE(SUM(CASE WHEN recognition_date < :cs
+                                  AND recognition_date >= :ps
+                                  AND sale_type='SALE'
+                                  THEN sale_amount ELSE 0 END), 0) as 이전기간_매출,
+                COALESCE(SUM(CASE WHEN recognition_date >= :cs AND sale_type='SALE'
+                                  THEN quantity ELSE 0 END), 0) as 이번기간_주문수,
+                COALESCE(SUM(CASE WHEN recognition_date < :cs
+                                  AND recognition_date >= :ps
+                                  AND sale_type='SALE'
+                                  THEN quantity ELSE 0 END), 0) as 이전기간_주문수
+            FROM revenue_history
+            WHERE account_id = :aid AND recognition_date >= :ps
+        """, {
+            "aid": _expo_aid,
+            "cs": _curr_start.isoformat(),
+            "ps": _prev_start.isoformat(),
+        })
+
+        if not _comp_df.empty:
+            _comp = _comp_df.iloc[0]
+            _curr_rev = int(_comp["이번기간_매출"])
+            _prev_rev = int(_comp["이전기간_매출"])
+            _curr_ord = int(_comp["이번기간_주문수"])
+            _prev_ord = int(_comp["이전기간_주문수"])
+
+            _rev_change = (((_curr_rev - _prev_rev) / _prev_rev * 100) if _prev_rev > 0
+                           else (100 if _curr_rev > 0 else 0))
+            _ord_change = (((_curr_ord - _prev_ord) / _prev_ord * 100) if _prev_ord > 0
+                           else (100 if _curr_ord > 0 else 0))
+
+            st.subheader(f"기간 비교 (최근 {_expo_period}일 vs 이전 {_expo_period}일)")
+
+            _cp1, _cp2, _cp3, _cp4 = st.columns(4)
+            _cp1.metric("이번 기간 매출", _fmt_krw_expo(_curr_rev),
+                        delta=f"{_rev_change:+.0f}%")
+            _cp2.metric("이전 기간 매출", _fmt_krw_expo(_prev_rev))
+            _cp3.metric("이번 기간 주문", f"{_curr_ord}건",
+                        delta=f"{_ord_change:+.0f}%")
+            _cp4.metric("이전 기간 주문", f"{_prev_ord}건")
+
+            # 일별 매출 추이 차트
+            _daily_comp = query_df("""
+                SELECT recognition_date as 날짜,
+                       SUM(CASE WHEN sale_type='SALE' THEN sale_amount ELSE -sale_amount END) as 매출
+                FROM revenue_history
+                WHERE account_id = :aid
+                    AND recognition_date >= :ps
+                GROUP BY recognition_date ORDER BY recognition_date
+            """, {"aid": _expo_aid, "ps": _prev_start.isoformat()})
+
+            if not _daily_comp.empty:
+                _daily_comp["날짜"] = pd.to_datetime(_daily_comp["날짜"])
+
+                import plotly.graph_objects as go
+                _fig_comp = go.Figure()
+
+                # 이전 기간
+                _prev_data = _daily_comp[_daily_comp["날짜"] < pd.Timestamp(_curr_start)]
+                _curr_data = _daily_comp[_daily_comp["날짜"] >= pd.Timestamp(_curr_start)]
+
+                if not _prev_data.empty:
+                    _fig_comp.add_trace(go.Scatter(
+                        x=list(range(len(_prev_data))),
+                        y=_prev_data["매출"],
+                        name=f"이전 {_expo_period}일",
+                        mode="lines+markers",
+                        line=dict(color="#999", dash="dot", width=1.5),
+                        opacity=0.7,
+                    ))
+
+                if not _curr_data.empty:
+                    _fig_comp.add_trace(go.Scatter(
+                        x=list(range(len(_curr_data))),
+                        y=_curr_data["매출"],
+                        name=f"최근 {_expo_period}일",
+                        mode="lines+markers",
+                        line=dict(color="#4ECDC4", width=2.5),
+                    ))
+
+                _fig_comp.update_layout(
+                    title="기간별 매출 비교",
+                    xaxis_title="일차", yaxis_title="매출 (원)",
+                    height=400,
+                    margin=dict(t=40, b=40, l=60, r=20),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                )
+                st.plotly_chart(_fig_comp, use_container_width=True)
+
+        else:
+            st.info("매출 데이터가 없어 기간 비교를 할 수 없습니다.")
+
+        # 점수 분포
+        if not _expo_scores_df.empty:
+            st.subheader("현재 점수 분포")
+            _grade_dist = _expo_scores_df["grade"].value_counts().reindex(["A", "B", "C", "D", "F"], fill_value=0)
+
+            import plotly.express as px
+            _fig_grade = px.bar(
+                x=_grade_dist.index, y=_grade_dist.values,
+                color=_grade_dist.index,
+                color_discrete_map={"A": "#28a745", "B": "#8bc34a", "C": "#ffc107", "D": "#ff9800", "F": "#dc3545"},
+                labels={"x": "등급", "y": "상품 수"},
+                title="등급별 상품 분포",
+            )
+            _fig_grade.update_layout(height=350, margin=dict(t=40, b=40), showlegend=False)
+            st.plotly_chart(_fig_grade, use_container_width=True)
+
+
 st.sidebar.divider()
-st.sidebar.caption("v3.8 | 수동 등록 페이지 추가")
+st.sidebar.caption("v4.2 | 노출 전략 페이지 추가")

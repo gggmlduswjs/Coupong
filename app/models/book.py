@@ -38,6 +38,7 @@ class Book(Base):
     source_url = Column(Text)  # 알라딘 URL
     publish_date = Column(Date)
     page_count = Column(Integer)
+    sales_point = Column(Integer, default=0, index=True)  # 알라딘 판매 포인트
 
     # 상태
     is_processed = Column(Boolean, default=False, index=True)

@@ -8,31 +8,43 @@ COUPANG_FEE_RATE = 0.11  # 판매가의 11%
 
 # 배송비
 DEFAULT_SHIPPING_COST = 2300  # 실제 택배비 (원)
-FREE_SHIPPING_THRESHOLD = 2000  # 무료배송 순마진 기준 (원) - 마진 2000원 이상이면 무료배송 가능
+FREE_SHIPPING_THRESHOLD = 2000  # (레거시) 무료배송 순마진 기준 — 신규: determine_customer_shipping_fee() 사용
 TARGET_MARGIN_MIN = 1300  # 목표 최소 마진 (원)
 TARGET_MARGIN_MAX = 2000  # 목표 최대 마진 (원)
+CONDITIONAL_FREE_THRESHOLD = 20000     # 기본 조건부 무료배송 기준 (원)
+CONDITIONAL_FREE_THRESHOLD_67 = 25000  # 공급률 67% 조건부 무료배송 기준 (원)
+CONDITIONAL_FREE_THRESHOLD_70 = 30000  # 공급률 70% 조건부 무료배송 기준 (원)
+CONDITIONAL_FREE_THRESHOLD_73 = 60000  # 공급률 73% 조건부 무료배송 기준 (원)
 
 # 재고
 DEFAULT_STOCK = 10  # 기본 재고 수량
 DEFAULT_LEAD_TIME = 2  # 출고 소요일
 LOW_STOCK_THRESHOLD = 3  # 재고 부족 기준 (이하면 리필)
 
+# ──── 안전장치 (스크립트 일괄 실행 차단) ────
+# 각 Lock이 True인 한 스크립트에서 해당 API 호출 차단
+# 대시보드 개별 조작만 허용 (dashboard_override=True 파라미터 필요)
+PRICE_LOCK = True       # 가격 변경 차단 (update_price, update_original_price, update_inventory)
+DELETE_LOCK = True      # 상품 삭제 차단 (delete_product)
+SALE_STOP_LOCK = True   # 판매 중지 차단 (stop_item_sale)
+REGISTER_LOCK = True    # 상품 등록 차단 (create_product)
+
 # API
 API_THROTTLE_SECONDS = 1.0  # 알라딘 API 호출 간격 (초)
 COUPANG_WING_RATE_LIMIT = 0.1  # WING API 호출 간격 (초, 10 calls/sec)
 
 # 쿠팡 WING API - 도서 상품 등록 기본값 (PDF 가이드 기반)
-# 마진 계산: 순마진 = 정가×0.151 + (고객배송비 - 실제배송비)
-# 유료배송(2,500원)이면 +200원, 무료배송이면 -2,300원
+# 마진 계산: 순마진 = 판매가 - 공급가 - 수수료 - 배송비(무료배송 시)
+# CONDITIONAL_FREE: 20,000원 미만 → 고객 부담, 이상 → 무료(셀러 부담)
 BOOK_PRODUCT_DEFAULTS = {
     "deliveryMethod": "SEQUENCIAL",              # 일반배송
-    "deliveryChargeType": "NOT_FREE",            # 유료배송 기본
-    "deliveryCharge": 2500,                       # 고객 부담 배송비 (실제 2,300원 + 200원 마진)
-    "freeShipOverAmount": 0,                      # 조건부 무료배송 금액 (0=사용안함)
-    "deliveryChargeOnReturn": 2500,
+    "deliveryChargeType": "CONDITIONAL_FREE",     # 조건부 무료배송 (20,000원 이상 무료)
+    "deliveryCharge": DEFAULT_SHIPPING_COST,        # 미달 시 고객 부담 배송비 (= 실제 택배비)
+    "freeShipOverAmount": CONDITIONAL_FREE_THRESHOLD,  # 조건부 무료배송 기준 금액 (20,000원)
+    "deliveryChargeOnReturn": DEFAULT_SHIPPING_COST,
     "unionDeliveryType": "UNION_DELIVERY",
     "remoteAreaDeliverable": "N",
-    "returnCharge": 2500,
+    "returnCharge": DEFAULT_SHIPPING_COST,
     "requested": True,                           # 자동 판매승인 요청
     "adultOnly": "EVERYONE",
     "taxType": "FREE",                           # 도서 비과세
@@ -98,6 +110,14 @@ AUTO_CRAWL_CONFIG = {
 }
 
 # ─────────────────────────────────────────────
+# 크롤링 제외 필터
+# ─────────────────────────────────────────────
+CRAWL_MIN_PRICE = 5000          # 정가 최소 기준 (미만 제외)
+CRAWL_EXCLUDE_KEYWORDS = [      # 제목/카테고리에 포함 시 제외
+    "사전", "잡지", "월간지", "자습서", "평가문제집",
+]
+
+# ─────────────────────────────────────────────
 # 가격/마진 설정
 # ─────────────────────────────────────────────
 PRICE_CONFIG = {
@@ -106,3 +126,84 @@ PRICE_CONFIG = {
     "min_margin_rate": 0.05,    # 최소 마진율 (5%)
     "bundle_threshold": 2000,   # 묶음 판매 기준 마진 (원)
 }
+
+# ─────────────────────────────────────────────
+# 배송비 결정 함수 (공급률 + 정가 기준)
+# ─────────────────────────────────────────────
+def determine_customer_shipping_fee(margin_rate: int, list_price: int) -> int:
+    """
+    공급률(매입률)과 정가 기준으로 고객 부담 배송비 결정
+
+    규칙:
+      공급률 ~55%: 정가 ≥ 15,000 → 무료 / 미만 → 2,300
+      공급률 ~60%: 정가 ≥ 18,000 → 무료 / 미만 → 2,300
+      공급률 ~62%: 정가 ≥ 18,000 → 무료 / 미만 → 2,000
+      공급률 ~65%: 정가 ≥ 20,500 → 무료 / 18,000~20,000 → 1,000 / 미만 → 2,300
+      공급률 ~70%: 18,500~29,000 → 1,000 / 15,000~18,000 → 2,000 / 그 외 → 2,300
+      공급률 73%+: 항상 2,300 (조건부 60,000원 무료)
+
+    Args:
+        margin_rate: 매입률/공급률 (정수 40~73)
+        list_price: 정가 (원)
+
+    Returns:
+        고객 부담 배송비 (0=무료, 1000, 2000, 2300)
+    """
+    if margin_rate <= 55:
+        # 공급률 ~55%: 15,000원 이상 무료배송
+        return 0 if list_price >= 15000 else DEFAULT_SHIPPING_COST
+
+    if margin_rate <= 60:
+        # 공급률 56~60%: 18,000원 이상 무료배송
+        return 0 if list_price >= 18000 else DEFAULT_SHIPPING_COST
+
+    if margin_rate <= 62:
+        # 공급률 61~62%: 18,000원 이상 무료 / 미만 → 2,000
+        return 0 if list_price >= 18000 else 2000
+
+    if margin_rate <= 65:
+        # 공급률 63~65%: 20,500 이상 무료 / 18,000~20,000 → 1,000
+        if list_price >= 20500:
+            return 0
+        if 18000 <= list_price <= 20000:
+            return 1000
+        return DEFAULT_SHIPPING_COST
+
+    if margin_rate <= 70:
+        # 공급률 66~70%: 18,500~29,000 → 1,000 / 15,000~18,000 → 2,000
+        if 18500 <= list_price <= 29000:
+            return 1000
+        if 15000 <= list_price <= 18000:
+            return 2000
+        return DEFAULT_SHIPPING_COST
+
+    # 공급률 73%+: 항상 2,300원 (조건부 60,000원 무료배송)
+    return DEFAULT_SHIPPING_COST
+
+
+def determine_delivery_charge_type(margin_rate: int, list_price: int) -> tuple:
+    """
+    배송비 유형 + 금액 + 무료배송 기준 결정 (WING API용)
+
+    Returns:
+        (deliveryChargeType, deliveryCharge, freeShipOverAmount)
+    """
+    customer_fee = determine_customer_shipping_fee(margin_rate, list_price)
+
+    if customer_fee == 0:
+        return ("FREE", 0, 0)
+
+    if margin_rate > 70:
+        # 73%+: 조건부 6만원 무료배송
+        return ("CONDITIONAL_FREE", DEFAULT_SHIPPING_COST, CONDITIONAL_FREE_THRESHOLD_73)
+
+    if margin_rate > 67:
+        # 68~70%: 조건부 3만원 무료배송
+        return ("CONDITIONAL_FREE", customer_fee, CONDITIONAL_FREE_THRESHOLD_70)
+
+    if margin_rate > 65:
+        # 66~67%: 조건부 2.5만원 무료배송
+        return ("CONDITIONAL_FREE", customer_fee, CONDITIONAL_FREE_THRESHOLD_67)
+
+    # 그 외 (~65%): 조건부 2만원 무료배송
+    return ("CONDITIONAL_FREE", customer_fee, CONDITIONAL_FREE_THRESHOLD)

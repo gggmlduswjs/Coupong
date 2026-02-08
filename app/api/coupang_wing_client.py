@@ -298,16 +298,24 @@ class CoupangWingClient:
 
         return all_products
 
-    def create_product(self, product_data: Dict[str, Any]) -> Dict[str, Any]:
+    def create_product(self, product_data: Dict[str, Any], dashboard_override: bool = False) -> Dict[str, Any]:
         """
-        상품 등록
+        상품 등록 (REGISTER_LOCK 안전장치 적용)
 
         Args:
             product_data: 상품 등록 JSON 데이터
+            dashboard_override: 대시보드에서 개별 등록 시에만 True
 
         Returns:
             등록 결과 (sellerProductId 포함)
         """
+        from app.constants import REGISTER_LOCK
+        if REGISTER_LOCK and not dashboard_override:
+            raise CoupangWingError(
+                "REGISTER_LOCKED",
+                "상품 등록이 잠겨있습니다 (REGISTER_LOCK=True). "
+                "스크립트에서 상품 일괄 등록은 금지됩니다."
+            )
         return self._request("POST", self.SELLER_PRODUCTS_PATH, data=product_data)
 
     def update_product(self, seller_product_id: int, product_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -338,16 +346,24 @@ class CoupangWingClient:
         path = f"{self.SELLER_PRODUCTS_PATH}/{seller_product_id}"
         return self._request("PATCH", path, data=product_data)
 
-    def delete_product(self, seller_product_id: int) -> Dict[str, Any]:
+    def delete_product(self, seller_product_id: int, dashboard_override: bool = False) -> Dict[str, Any]:
         """
-        상품 삭제 (판매중지)
+        상품 삭제 (DELETE_LOCK 안전장치 적용)
 
         Args:
             seller_product_id: 삭제할 상품 ID
+            dashboard_override: 대시보드에서 개별 삭제 시에만 True
 
         Returns:
             삭제 결과
         """
+        from app.constants import DELETE_LOCK
+        if DELETE_LOCK and not dashboard_override:
+            raise CoupangWingError(
+                "DELETE_LOCKED",
+                "상품 삭제가 잠겨있습니다 (DELETE_LOCK=True). "
+                "스크립트에서 상품 일괄 삭제는 금지됩니다."
+            )
         path = f"{self.SELLER_PRODUCTS_PATH}/{seller_product_id}"
         return self._request("DELETE", path)
 
@@ -463,20 +479,31 @@ class CoupangWingClient:
     # 재고/가격 관리
     # ─────────────────────────────────────────────
 
-    def update_price(self, vendor_item_id: int, new_price: int, force: bool = True) -> Dict[str, Any]:
+    def update_price(self, vendor_item_id: int, new_price: int, force: bool = True,
+                     dashboard_override: bool = False) -> Dict[str, Any]:
         """
-        옵션별 가격 변경
+        옵션별 가격 변경 (PRICE_LOCK 안전장치 적용)
 
         Args:
             vendor_item_id: 벤더 아이템 ID
             new_price: 새 판매가 (10원 단위)
             force: 가격 변경 비율 제한 해제 (기본 True)
-                   - False: 기존 가격 대비 최대 50% 인하 / 100% 인상까지만 가능
-                   - True: 제한 없이 변경 가능
+            dashboard_override: 대시보드에서 개별 수정 시에만 True
 
         Returns:
             업데이트 결과
+
+        Raises:
+            CoupangWingError: PRICE_LOCK이 True이고 dashboard_override가 False일 때
         """
+        from app.constants import PRICE_LOCK
+        if PRICE_LOCK and not dashboard_override:
+            raise CoupangWingError(
+                "PRICE_LOCKED",
+                "가격 변경이 잠겨있습니다 (PRICE_LOCK=True). "
+                "스크립트에서 가격 일괄 변경은 금지됩니다. "
+                "대시보드 개별 수정만 허용됩니다."
+            )
         path = f"{self.VENDOR_ITEMS_PATH}/{vendor_item_id}/prices/{new_price}"
         params = {"forceSalePriceUpdate": "true"} if force else None
         return self._request("PUT", path, params=params)
@@ -495,20 +522,23 @@ class CoupangWingClient:
         path = f"{self.VENDOR_ITEMS_PATH}/{vendor_item_id}/quantities/{quantity}"
         return self._request("PUT", path)
 
-    def update_inventory(self, vendor_item_id: int, quantity: int, price: int) -> Dict[str, Any]:
+    def update_inventory(self, vendor_item_id: int, quantity: int, price: int,
+                         dashboard_override: bool = False) -> Dict[str, Any]:
         """
         재고/가격 동시 업데이트 (deprecated - update_price, update_quantity 사용 권장)
+        PRICE_LOCK 안전장치 적용
 
         Args:
             vendor_item_id: 벤더 아이템 ID
             quantity: 재고 수량
             price: 판매가
+            dashboard_override: 대시보드에서 개별 수정 시에만 True
 
         Returns:
             업데이트 결과
         """
         # 가격 먼저, 재고 다음
-        price_result = self.update_price(vendor_item_id, price)
+        price_result = self.update_price(vendor_item_id, price, dashboard_override=dashboard_override)
         quantity_result = self.update_quantity(vendor_item_id, quantity)
         return {"price": price_result, "quantity": quantity_result}
 
@@ -525,30 +555,50 @@ class CoupangWingClient:
         path = f"{self.VENDOR_ITEMS_PATH}/{vendor_item_id}/inventories"
         return self._request("GET", path)
 
-    def update_original_price(self, vendor_item_id: int, original_price: int) -> Dict[str, Any]:
+    def update_original_price(self, vendor_item_id: int, original_price: int,
+                              dashboard_override: bool = False) -> Dict[str, Any]:
         """
-        아이템별 할인율 기준가격 변경
+        아이템별 할인율 기준가격 변경 (PRICE_LOCK 안전장치 적용)
 
         Args:
             vendor_item_id: 벤더 아이템 ID
             original_price: 할인율 기준가격 (원래가격)
+            dashboard_override: 대시보드에서 개별 수정 시에만 True
 
         Returns:
             변경 결과
+
+        Raises:
+            CoupangWingError: PRICE_LOCK이 True이고 dashboard_override가 False일 때
         """
+        from app.constants import PRICE_LOCK
+        if PRICE_LOCK and not dashboard_override:
+            raise CoupangWingError(
+                "PRICE_LOCKED",
+                "기준가격 변경이 잠겨있습니다 (PRICE_LOCK=True). "
+                "스크립트에서 가격 일괄 변경은 금지됩니다."
+            )
         path = f"{self.VENDOR_ITEMS_PATH}/{vendor_item_id}/original-prices/{original_price}"
         return self._request("PUT", path)
 
-    def stop_item_sale(self, vendor_item_id: int) -> Dict[str, Any]:
+    def stop_item_sale(self, vendor_item_id: int, dashboard_override: bool = False) -> Dict[str, Any]:
         """
-        아이템별 판매 중지
+        아이템별 판매 중지 (SALE_STOP_LOCK 안전장치 적용)
 
         Args:
             vendor_item_id: 벤더 아이템 ID
+            dashboard_override: 대시보드에서 개별 중지 시에만 True
 
         Returns:
             중지 결과
         """
+        from app.constants import SALE_STOP_LOCK
+        if SALE_STOP_LOCK and not dashboard_override:
+            raise CoupangWingError(
+                "SALE_STOP_LOCKED",
+                "판매 중지가 잠겨있습니다 (SALE_STOP_LOCK=True). "
+                "스크립트에서 판매 일괄 중지는 금지됩니다."
+            )
         path = f"{self.VENDOR_ITEMS_PATH}/{vendor_item_id}/sales/stop"
         return self._request("PUT", path)
 
@@ -1066,6 +1116,181 @@ class CoupangWingClient:
         if isinstance(data, list):
             return data
         return [data] if data else []
+
+    # ─────────────────────────────────────────────
+    # 반품/취소 관리
+    # ─────────────────────────────────────────────
+
+    def get_return_requests(self, date_from: str, date_to: str,
+                            status: str = None, cancel_type: str = None,
+                            token: str = "", max_per_page: int = 50) -> Dict[str, Any]:
+        """
+        반품/취소 요청 목록 조회 (단일 페이지)
+
+        Args:
+            date_from: 시작일 (YYYY-MM-DD)
+            date_to: 종료일 (YYYY-MM-DD)
+            status: 상태 필터 (RU/UC/CC/PR 등)
+            cancel_type: 유형 필터 (CANCEL 등)
+            token: 페이징 토큰
+            max_per_page: 페이지당 건수 (기본 50)
+
+        Returns:
+            반품 목록 응답 (data, hasNext, nextToken)
+        """
+        path = f"/v2/providers/openapi/apis/api/v6/vendors/{self.vendor_id}/returnRequests"
+        # API 요구 형식: yyyy-MM-ddTHH:mm
+        _from = date_from if "T" in date_from else f"{date_from}T00:00"
+        _to = date_to if "T" in date_to else f"{date_to}T23:59"
+        params = {
+            "searchType": "timeFrame",
+            "createdAtFrom": _from,
+            "createdAtTo": _to,
+            "maxPerPage": str(max_per_page),
+        }
+        if status:
+            params["status"] = status
+        if cancel_type:
+            params["cancelType"] = cancel_type
+        if token:
+            params["token"] = token
+        return self._request("GET", path, params=params)
+
+    def get_all_return_requests(self, date_from: str, date_to: str,
+                                 status: str = None, cancel_type: str = None) -> List[Dict]:
+        """
+        반품/취소 요청 전체 조회 (자동 페이징)
+
+        Args:
+            date_from: 시작일 (YYYY-MM-DD)
+            date_to: 종료일 (YYYY-MM-DD)
+            status: 상태 필터
+            cancel_type: 유형 필터
+
+        Returns:
+            전체 반품 요청 리스트
+        """
+        all_data = []
+        token = ""
+        page = 0
+        while True:
+            result = self.get_return_requests(
+                date_from, date_to, status=status,
+                cancel_type=cancel_type, token=token
+            )
+            data = result.get("data", [])
+            if isinstance(data, list):
+                all_data.extend(data)
+            elif isinstance(data, dict):
+                items = data.get("returnDtoList", data.get("items", []))
+                all_data.extend(items)
+            page += 1
+            logger.info(f"  반품 목록 페이지 {page}: {len(data) if isinstance(data, list) else '?'}건")
+
+            if not result.get("hasNext", False):
+                break
+            token = result.get("nextToken", "")
+            if not token:
+                break
+        return all_data
+
+    def get_return_request(self, receipt_id: int) -> Dict[str, Any]:
+        """
+        반품/취소 단건 조회
+
+        Args:
+            receipt_id: 접수번호
+
+        Returns:
+            반품 상세 정보
+        """
+        path = f"/v2/providers/openapi/apis/api/v6/vendors/{self.vendor_id}/returnRequests/{receipt_id}"
+        return self._request("GET", path)
+
+    def confirm_return_receipt(self, receipt_id: int) -> Dict[str, Any]:
+        """
+        반품 입고 확인 (판매자 창고 도착 확인)
+
+        Args:
+            receipt_id: 접수번호
+
+        Returns:
+            처리 결과
+        """
+        path = f"/v2/providers/openapi/apis/api/v4/vendors/{self.vendor_id}/returnRequests/{receipt_id}/receiveConfirmation"
+        return self._request("PUT", path)
+
+    def approve_return_request(self, receipt_id: int) -> Dict[str, Any]:
+        """
+        반품 승인
+
+        Args:
+            receipt_id: 접수번호
+
+        Returns:
+            처리 결과
+        """
+        path = f"/v2/providers/openapi/apis/api/v4/vendors/{self.vendor_id}/returnRequests/{receipt_id}/approval"
+        return self._request("PUT", path)
+
+    def get_return_withdrawals(self, date_from: str, date_to: str,
+                                max_per_page: int = 50, token: str = "") -> Dict[str, Any]:
+        """
+        반품 철회 이력 조회 (기간별)
+
+        Args:
+            date_from: 시작일 (YYYY-MM-DD)
+            date_to: 종료일 (YYYY-MM-DD)
+            max_per_page: 페이지당 건수
+            token: 페이징 토큰
+
+        Returns:
+            철회 이력 응답
+        """
+        path = f"/v2/providers/openapi/apis/api/v4/vendors/{self.vendor_id}/returnWithdrawRequests"
+        params = {
+            "createdAtFrom": date_from,
+            "createdAtTo": date_to,
+            "maxPerPage": str(max_per_page),
+        }
+        if token:
+            params["token"] = token
+        return self._request("GET", path, params=params)
+
+    def get_return_withdrawals_by_ids(self, receipt_ids: List[int]) -> Dict[str, Any]:
+        """
+        반품 철회 이력 조회 (접수번호 기반)
+
+        Args:
+            receipt_ids: 접수번호 리스트
+
+        Returns:
+            철회 이력 응답
+        """
+        path = f"/v2/providers/openapi/apis/api/v4/vendors/{self.vendor_id}/returnWithdrawList"
+        data = {"receiptIds": receipt_ids}
+        return self._request("POST", path, data=data)
+
+    def create_return_invoice(self, receipt_id: int, delivery_company_code: str,
+                               invoice_number: str) -> Dict[str, Any]:
+        """
+        회수 송장 등록 (수동 회수 시)
+
+        Args:
+            receipt_id: 접수번호
+            delivery_company_code: 택배사 코드 (CJGLS, EPOST 등)
+            invoice_number: 운송장번호
+
+        Returns:
+            처리 결과
+        """
+        path = f"/v2/providers/openapi/apis/api/v4/vendors/{self.vendor_id}/return-exchange-invoices/manual"
+        data = {
+            "receiptId": receipt_id,
+            "deliveryCompanyCode": delivery_company_code,
+            "invoiceNumber": invoice_number,
+        }
+        return self._request("POST", path, data=data)
 
     # ─────────────────────────────────────────────
     # 연결 테스트

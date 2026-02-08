@@ -3,7 +3,7 @@ from sqlalchemy import Column, Integer, String, Boolean, Text, Float, DateTime, 
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from app.database import Base
-from app.constants import DEFAULT_SHIPPING_COST, FREE_SHIPPING_THRESHOLD, DEFAULT_STOCK
+from app.constants import DEFAULT_SHIPPING_COST, DEFAULT_STOCK
 
 
 class Product(Base):
@@ -110,7 +110,7 @@ class Product(Base):
     @property
     def is_free_shipping_eligible(self):
         """무료배송 가능 상품인지"""
-        return self.net_margin >= FREE_SHIPPING_THRESHOLD
+        return self.shipping_policy == 'free'
 
     def is_uploaded_to_account(self, account_id, db_session):
         """특정 계정에 이미 업로드되었는지 체크"""
