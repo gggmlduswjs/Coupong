@@ -1366,40 +1366,18 @@ elif page == "신규 등록":
             accs_str = str(display.iloc[i].get("listed_accounts", "") or "")
             _sel_listed_sets.append(set(a.strip() for a in accs_str.split(",") if a.strip()))
 
-        _nr_acc_table = []
-        for _acc in _wing_accounts:
+        # 계정별 체크박스 (이미 전체 등록된 계정은 disabled)
+        _nr_selected_accounts = []
+        _acc_cols = st.columns(len(_wing_accounts))
+        for _ci, _acc in enumerate(_wing_accounts):
             _acc_name = _acc["account_name"]
             _unlisted = sum(1 for s in _sel_listed_sets if _acc_name not in s) if sel_cnt > 0 else 0
-            _nr_acc_table.append({
-                "선택": _unlisted > 0,
-                "계정명": _acc_name,
-                "미등록": f"{_unlisted}/{sel_cnt}" if sel_cnt > 0 else "-",
-                "vendorId": _acc.get("vendor_id", ""),
-                "출고지": _acc.get("outbound_shipping_code", "-"),
-                "반품센터": _acc.get("return_center_code", "-"),
-            })
-        _nr_acc_df = pd.DataFrame(_nr_acc_table)
-        _nr_edited_acc = st.data_editor(
-            _nr_acc_df, hide_index=True, key="nr_acc_editor",
-            column_config={
-                "선택": st.column_config.CheckboxColumn("선택", default=True),
-                "계정명": st.column_config.TextColumn("계정명", disabled=True),
-                "미등록": st.column_config.TextColumn("미등록", disabled=True),
-                "vendorId": st.column_config.TextColumn("Vendor ID", disabled=True),
-                "출고지": st.column_config.TextColumn("출고지 코드", disabled=True),
-                "반품센터": st.column_config.TextColumn("반품센터 코드", disabled=True),
-            },
-            width="stretch",
-        )
-
-        # 선택된 계정 추출
-        _nr_selected_accounts = []
-        for _idx, _erow in _nr_edited_acc.iterrows():
-            if _erow["선택"]:
-                for _acc in _wing_accounts:
-                    if _acc["account_name"] == _erow["계정명"]:
-                        _nr_selected_accounts.append(_acc)
-                        break
+            _is_full = (_unlisted == 0 and sel_cnt > 0)
+            with _acc_cols[_ci]:
+                _label = f"{_acc_name} ({_unlisted}/{sel_cnt})" if sel_cnt > 0 else _acc_name
+                _checked = st.checkbox(_label, value=not _is_full, disabled=_is_full, key=f"nr_acc_{_acc_name}")
+            if _checked:
+                _nr_selected_accounts.append(_acc)
         _nr_sel_acc_cnt = len(_nr_selected_accounts)
 
         # 등록 정보 요약 (이미 등록된 조합 제외)
