@@ -901,30 +901,64 @@ class CoupangWingClient:
     def acknowledge_ordersheets(self, shipment_box_ids: List[int]) -> Dict[str, Any]:
         """
         발주서 확인 (상품준비중 처리: ACCEPT → INSTRUCT)
+        - 최대 50건씩 배치 처리
+        - vendorId를 body에 포함 (API 필수)
 
         Args:
             shipment_box_ids: 묶음배송번호 리스트
 
         Returns:
-            처리 결과
+            처리 결과 (여러 배치일 경우 마지막 배치 결과 + 통합 responseList)
         """
         path = f"/v2/providers/openapi/apis/api/v4/vendors/{self.vendor_id}/ordersheets/acknowledgement"
-        data = {"shipmentBoxIds": shipment_box_ids}
-        return self._request("PUT", path, data=data)
+
+        # 50건 초과 시 배치 분할
+        batch_size = 50
+        all_response_list = []
+        last_result = None
+
+        for i in range(0, len(shipment_box_ids), batch_size):
+            batch = shipment_box_ids[i:i + batch_size]
+            data = {
+                "vendorId": self.vendor_id,
+                "shipmentBoxIds": batch,
+            }
+            result = self._request("PUT", path, data=data)
+            last_result = result
+
+            # responseList 수집
+            if isinstance(result, dict) and "data" in result:
+                resp_data = result["data"]
+                if isinstance(resp_data, dict) and "responseList" in resp_data:
+                    all_response_list.extend(resp_data["responseList"])
+
+        # 통합 결과 반환
+        if last_result and isinstance(last_result, dict) and "data" in last_result:
+            last_result["data"]["responseList"] = all_response_list
+        return last_result
 
     def upload_invoice(self, invoice_data_list: List[Dict]) -> Dict[str, Any]:
         """
-        송장 업로드 (운송장 등록)
+        송장 업로드 (운송장 등록: INSTRUCT → DEPARTURE)
 
         Args:
             invoice_data_list: 송장 데이터 리스트
-                [{shipmentBoxId, orderId, vendorItemId, deliveryCompanyCode, invoiceNumber, splitShipping(optional)}]
+                [{shipmentBoxId, orderId, vendorItemId, deliveryCompanyCode, invoiceNumber,
+                  splitShipping, preSplitShipped, estimatedShippingDate}]
 
         Returns:
             업로드 결과
         """
-        path = f"/v2/providers/openapi/apis/api/v4/vendors/{self.vendor_id}/ordersheets/invoices"
-        data = {"orderSheetInvoices": invoice_data_list}
+        path = f"/v2/providers/openapi/apis/api/v4/vendors/{self.vendor_id}/orders/invoices"
+        # 필수 필드 기본값 보장
+        for item in invoice_data_list:
+            item.setdefault("splitShipping", False)
+            item.setdefault("preSplitShipped", False)
+            item.setdefault("estimatedShippingDate", "")
+        data = {
+            "vendorId": self.vendor_id,
+            "orderSheetInvoiceApplyDtos": invoice_data_list,
+        }
         return self._request("POST", path, data=data)
 
     def update_invoice(self, invoice_data_list: List[Dict]) -> Dict[str, Any]:

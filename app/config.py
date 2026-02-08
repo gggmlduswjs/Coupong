@@ -9,6 +9,16 @@ class Settings(BaseSettings):
     # Database
     database_url: str = "sqlite:///./coupang_auto.db"
 
+    # Supabase PostgreSQL — Streamlit Cloud 배포용
+    supabase_database_url: Optional[str] = None
+    supabase_url: Optional[str] = None
+    supabase_service_key: Optional[str] = None
+    supabase_anon_key: Optional[str] = None
+
+    # Turso (libSQL) — 레거시
+    turso_database_url: Optional[str] = None
+    turso_auth_token: Optional[str] = None
+
     # Redis
     redis_url: str = "redis://localhost:6379/0"
 

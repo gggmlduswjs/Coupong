@@ -77,6 +77,10 @@ def _migrate_listing_detail_columns():
         "return_charge": "INTEGER",
         "raw_json": "TEXT",
         "detail_synced_at": "DATETIME",
+        # 아이템 위너 필드
+        "winner_status": "VARCHAR(20)",
+        "winner_checked_at": "DATETIME",
+        "item_id": "VARCHAR(50)",
     })
 
 
@@ -195,6 +199,18 @@ def _parse_detail_fields(detail_data: dict) -> dict:
         result["original_price"] = item.get("originalPrice", None)
         result["sale_price"] = item.get("salePrice", None)
 
+        # 아이템 위너 정보
+        winner_raw = item.get("winner")
+        if winner_raw is True:
+            result["winner_status"] = "winner"
+        elif winner_raw is False:
+            result["winner_status"] = "not_winner"
+        else:
+            result["winner_status"] = None
+
+        # 아이템 ID (vendorItemId와 별개의 productId)
+        result["item_id"] = str(item.get("itemId", "")) or None
+
         # attributes에서 ISBN, 출판사 추출
         result["isbn"] = None
         result["publisher"] = None
@@ -214,6 +230,8 @@ def _parse_detail_fields(detail_data: dict) -> dict:
         result["supply_price"] = None
         result["original_price"] = None
         result["sale_price"] = None
+        result["winner_status"] = None
+        result["item_id"] = None
         result["isbn"] = None
         result["publisher"] = None
 
@@ -454,12 +472,19 @@ def sync_account_products(
             lst.display_category_code = parsed["display_category_code"]
             lst.delivery_charge_type = parsed["delivery_charge_type"]
             lst.maximum_buy_count = parsed["maximum_buy_count"]
-            if parsed["maximum_buy_count"] and parsed["maximum_buy_count"] > 0:
-                lst.stock_quantity = parsed["maximum_buy_count"]
+            # Note: maximumBuyCount는 구매제한 수량(1000)이므로 stock_quantity에 넣지 않음
+            # 실제 재고는 아래 get_item_inventory() API에서 amountInStock으로 업데이트
             lst.supply_price = parsed["supply_price"]
             lst.delivery_charge = parsed["delivery_charge"]
             lst.free_ship_over_amount = parsed["free_ship_over_amount"]
             lst.return_charge = parsed["return_charge"]
+
+            # 아이템 위너 정보
+            if parsed["winner_status"] is not None:
+                lst.winner_status = parsed["winner_status"]
+                lst.winner_checked_at = now
+            if parsed["item_id"] and not lst.item_id:
+                lst.item_id = parsed["item_id"]
 
             # ISBN (attributes에서 추출한 것이 더 정확)
             # 단, 같은 account_id + isbn 조합이 이미 있으면 스킵 (UNIQUE 제약)

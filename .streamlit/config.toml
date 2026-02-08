@@ -1,0 +1,9 @@
+[server]
+address = "0.0.0.0"
+port = 8503
+headless = true
+# Tailscale HTTPS 프록시를 통한 원격 접속 허용
+enableXsrfProtection = false
+enableCORS = false
+# 업로드 타임아웃 방지
+maxMessageSize = 200

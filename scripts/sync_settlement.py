@@ -17,11 +17,13 @@ from datetime import datetime, date
 from pathlib import Path
 from typing import List, Optional, Callable
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 
 # 프로젝트 루트
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
+
+from app.database import get_engine_for_db
 
 from dotenv import load_dotenv
 load_dotenv(ROOT / ".env")
@@ -74,9 +76,7 @@ class SettlementSync:
     ]
 
     def __init__(self, db_path: str = None):
-        if db_path is None:
-            db_path = str(ROOT / "coupang_auto.db")
-        self.engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False, "timeout": 30})
+        self.engine = get_engine_for_db(db_path)
         self._ensure_table()
 
     def _ensure_table(self):
@@ -278,7 +278,7 @@ def main():
     print("=" * 60)
 
     # DB 확인
-    eng = create_engine(f"sqlite:///{ROOT / 'coupang_auto.db'}")
+    eng = get_engine_for_db()
     with eng.connect() as conn:
         cnt = conn.execute(text("SELECT COUNT(*) FROM settlement_history")).scalar()
         print(f"\nsettlement_history 총 레코드: {cnt:,}건")

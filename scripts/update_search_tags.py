@@ -36,6 +36,7 @@ from app.models.listing import Listing
 from app.models.book import Book
 from app.models.account import Account
 from app.api.coupang_wing_client import CoupangWingClient, CoupangWingError
+from uploaders.coupang_api_uploader import _dedupe_attributes
 
 logging.basicConfig(
     level=logging.INFO,
@@ -586,7 +587,7 @@ def update_product_search_tags(
                 "searchTags": new_tags,
                 "images": item.get("images", []),
                 "notices": item.get("notices", []),
-                "attributes": item.get("attributes", []),
+                "attributes": _dedupe_attributes(item.get("attributes", [])),
                 "contents": item.get("contents", []),
                 "certifications": item.get("certifications", []),
             }

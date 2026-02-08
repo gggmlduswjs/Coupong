@@ -77,10 +77,8 @@ def log_to_obsidian(message: str, title: str = "자동 크롤링"):
 
 def run_crawl():
     """크롤링 + 마진 분석 실행"""
-    from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
-    from app.config import settings
-    from app.database import init_db
+    from app.database import engine as _default_engine, init_db
     from scripts.franchise_sync import FranchiseSync
 
     logger.info("=" * 60)
@@ -89,11 +87,7 @@ def run_crawl():
 
     start_time = datetime.now()
 
-    # DB timeout 설정 (대시보드 동시 접근 충돌 방지)
-    db_url = settings.database_url
-    connect_args = {"check_same_thread": False, "timeout": DB_TIMEOUT} if "sqlite" in db_url else {}
-    engine = create_engine(db_url, connect_args=connect_args, echo=False)
-    Session = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    Session = sessionmaker(autocommit=False, autoflush=False, bind=_default_engine)
     db = Session()
 
     init_db()

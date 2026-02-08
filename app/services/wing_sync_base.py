@@ -10,7 +10,7 @@ import logging
 from pathlib import Path
 from typing import List, Dict, Optional, Callable
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 logger = logging.getLogger(__name__)
@@ -101,25 +101,9 @@ class WingSyncBase:
         Args:
             db_path: DB 파일 경로 (None이면 기본 경로)
         """
-        if db_path is None:
-            db_path = str(ROOT / "coupang_auto.db")
-
+        from app.database import get_engine_for_db
         self.db_path = db_path
-        self.engine = create_engine(
-            f"sqlite:///{db_path}",
-            connect_args={"check_same_thread": False, "timeout": 30}
-        )
-        # SQLite WAL 모드 + busy_timeout (동시 접근 허용)
-        from sqlalchemy import event as _sa_event
-        @_sa_event.listens_for(self.engine, "connect")
-        def _set_sqlite_pragma(dbapi_conn, connection_record):
-            cursor = dbapi_conn.cursor()
-            cursor.execute("PRAGMA busy_timeout=30000")
-            try:
-                cursor.execute("PRAGMA journal_mode=WAL")
-            except Exception:
-                pass
-            cursor.close()
+        self.engine = get_engine_for_db(db_path)
 
     def get_accounts(self, account_name: Optional[str] = None) -> List[Dict]:
         """WING API 활성 계정 조회"""

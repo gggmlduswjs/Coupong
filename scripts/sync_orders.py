@@ -18,11 +18,13 @@ from datetime import datetime, date, timedelta
 from pathlib import Path
 from typing import List, Optional, Callable
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 
 # 프로젝트 루트
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
+
+from app.database import get_engine_for_db
 
 from dotenv import load_dotenv
 load_dotenv(ROOT / ".env")
@@ -89,20 +91,7 @@ class OrderSync:
     ]
 
     def __init__(self, db_path: str = None):
-        if db_path is None:
-            db_path = str(ROOT / "coupang_auto.db")
-        self.engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False, "timeout": 30})
-        # SQLite WAL 모드 + busy_timeout (동시 접근 허용)
-        from sqlalchemy import event as _sa_event
-        @_sa_event.listens_for(self.engine, "connect")
-        def _set_sqlite_pragma(dbapi_conn, connection_record):
-            cursor = dbapi_conn.cursor()
-            cursor.execute("PRAGMA busy_timeout=30000")
-            try:
-                cursor.execute("PRAGMA journal_mode=WAL")
-            except Exception:
-                pass
-            cursor.close()
+        self.engine = get_engine_for_db(db_path)
         self._ensure_table()
 
     def _ensure_table(self):
@@ -130,6 +119,15 @@ class OrderSync:
             return dt_str.isoformat()
         # "2026-01-15T10:30:00" 형식
         return str(dt_str)[:19]
+
+    @staticmethod
+    def _extract_price(price_val) -> int:
+        """v5 가격 Object {currencyCode, units, nanos} 또는 v4 plain int 파싱"""
+        if price_val is None:
+            return 0
+        if isinstance(price_val, dict):
+            return int(price_val.get("units", 0) or 0)
+        return int(price_val or 0)
 
     def _match_listing(self, conn, account_id: int, seller_product_id, product_name: str = None) -> Optional[int]:
         """seller_product_id 또는 product_name으로 listings 매칭"""
@@ -216,13 +214,12 @@ class OrderSync:
                         sp_id = item.get("sellerProductId") or os_data.get("sellerProductId")
                         sp_name = item.get("sellerProductName") or os_data.get("sellerProductName", "")
 
-                        # v4 응답: orderer/receiver가 중첩 객체
+                        # v5 응답: orderer/receiver가 중첩 객체, 가격은 {units, nanos} Object
                         orderer = os_data.get("orderer") or {}
                         receiver = os_data.get("receiver") or {}
                         addr1 = receiver.get("addr1", "") or ""
                         addr2 = receiver.get("addr2", "") or ""
                         receiver_addr = f"{addr1} {addr2}".strip()
-                        os_shipping_price = int(os_data.get("shippingPrice", 0) or 0)
 
                         params = {
                             "account_id": account_id,
@@ -243,10 +240,10 @@ class OrderSync:
                             "shipping_count": int(item.get("shippingCount", 0) or 0),
                             "cancel_count": int(item.get("cancelCount", 0) or 0),
                             "hold_count_for_cancel": int(item.get("holdCountForCancel", 0) or 0),
-                            "sales_price": int(item.get("salesPrice", 0) or 0),
-                            "order_price": int(item.get("orderPrice", 0) or 0),
-                            "discount_price": int(item.get("discountPrice", 0) or 0),
-                            "shipping_price": os_shipping_price,
+                            "sales_price": self._extract_price(item.get("salesPrice")),
+                            "order_price": self._extract_price(item.get("orderPrice")),
+                            "discount_price": self._extract_price(item.get("discountPrice")),
+                            "shipping_price": self._extract_price(os_data.get("shippingPrice")),
                             "delivery_company_name": os_data.get("deliveryCompanyName", ""),
                             "invoice_number": os_data.get("invoiceNumber", ""),
                             "shipment_type": os_data.get("shipmentType", ""),
@@ -398,8 +395,7 @@ def main():
     print("=" * 60)
 
     # DB 확인
-    from sqlalchemy import create_engine as ce
-    eng = ce(f"sqlite:///{ROOT / 'coupang_auto.db'}")
+    eng = get_engine_for_db()
     with eng.connect() as conn:
         cnt = conn.execute(text("SELECT COUNT(*) FROM orders")).scalar()
         print(f"\norders 총 레코드: {cnt:,}건")

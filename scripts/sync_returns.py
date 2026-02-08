@@ -18,11 +18,13 @@ from datetime import datetime, date, timedelta
 from pathlib import Path
 from typing import List, Optional, Callable
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 
 # 프로젝트 루트
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
+
+from app.database import get_engine_for_db
 
 from dotenv import load_dotenv
 load_dotenv(ROOT / ".env")
@@ -91,20 +93,7 @@ class ReturnSync:
     ]
 
     def __init__(self, db_path: str = None):
-        if db_path is None:
-            db_path = str(ROOT / "coupang_auto.db")
-        self.engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False, "timeout": 30})
-        # SQLite WAL 모드 + busy_timeout (동시 접근 허용)
-        from sqlalchemy import event as _sa_event
-        @_sa_event.listens_for(self.engine, "connect")
-        def _set_sqlite_pragma(dbapi_conn, connection_record):
-            cursor = dbapi_conn.cursor()
-            cursor.execute("PRAGMA busy_timeout=30000")
-            try:
-                cursor.execute("PRAGMA journal_mode=WAL")
-            except Exception:
-                pass
-            cursor.close()
+        self.engine = get_engine_for_db(db_path)
         self._ensure_table()
 
     def _ensure_table(self):
@@ -425,8 +414,7 @@ def main():
     print("=" * 60)
 
     # DB 확인
-    from sqlalchemy import create_engine as ce
-    eng = ce(f"sqlite:///{ROOT / 'coupang_auto.db'}")
+    eng = get_engine_for_db()
     with eng.connect() as conn:
         cnt = conn.execute(text("SELECT COUNT(*) FROM return_requests")).scalar()
         print(f"\nreturn_requests 총 레코드: {cnt:,}건")

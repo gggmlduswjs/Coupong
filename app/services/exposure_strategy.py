@@ -11,7 +11,7 @@ from datetime import date, timedelta
 from typing import List, Dict, Optional
 
 import pandas as pd
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 logger = logging.getLogger(__name__)

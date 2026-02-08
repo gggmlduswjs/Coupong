@@ -542,19 +542,43 @@ def _parse_subject(title: str) -> str:
     """제목에서 학습과목 추출"""
     # 우선순위 순 (구체적 → 일반적)
     subject_map = [
+        # 수학 (구체적 과목명 → 일반)
         ("미적분", "수학"), ("확률과통계", "수학"), ("확률과 통계", "수학"),
-        ("기하", "수학"), ("대수", "수학"),
+        ("기하", "수학"), ("대수", "수학"), ("공통수학", "수학"),
+        ("연산", "수학"), ("구구단", "수학"), ("도형", "수학"),
+        ("셈", "수학"), ("곱셈", "수학"), ("나눗셈", "수학"), ("분수", "수학"),
+        # 국어 (구체적 → 일반)
+        ("언어와매체", "국어"), ("언어와 매체", "국어"), ("언매", "국어"),
+        ("화법과작문", "국어"), ("화법과 작문", "국어"), ("화작", "국어"),
+        ("독서", "국어"), ("문학", "국어"), ("문법", "국어"),
+        # 과학 (구체적 과목명)
         ("생명과학", "과학"), ("지구과학", "과학"), ("물리학", "과학"),
         ("물리", "과학"), ("화학", "과학"), ("생물", "과학"),
+        ("통합과학", "과학"),
+        # 사회/역사 (구체적 → 일반)
         ("한국사", "역사"), ("세계사", "역사"), ("동아시아사", "역사"),
         ("한국지리", "사회"), ("세계지리", "사회"),
-        ("경제", "사회"), ("정치와법", "사회"), ("윤리와사상", "사회"),
-        ("생활과윤리", "사회"), ("사회문화", "사회"), ("사회·문화", "사회"),
+        ("경제", "사회"), ("정치와법", "사회"), ("정치와 법", "사회"),
+        ("윤리와사상", "사회"), ("윤리와 사상", "사회"),
+        ("생활과윤리", "사회"), ("생활과 윤리", "사회"),
+        ("사회문화", "사회"), ("사회 문화", "사회"), ("사회·문화", "사회"),
+        ("통합사회", "사회"),
+        # 일반 과목명
         ("수학", "수학"), ("국어", "국어"), ("영어", "영어"),
         ("과학", "과학"), ("사회", "사회"), ("역사", "역사"),
-        ("독서", "국어"), ("문학", "국어"), ("문법", "국어"),
+        # 영어 (다양한 키워드)
         ("독해", "영어"), ("리딩", "영어"), ("Reading", "영어"),
         ("파닉스", "영어"), ("phonics", "영어"), ("Phonics", "영어"),
+        ("VOCA", "영어"), ("Voca", "영어"), ("voca", "영어"),
+        ("보카", "영어"), ("어휘", "영어"), ("단어", "영어"), ("숙어", "영어"),
+        ("grammar", "영어"), ("Grammar", "영어"), ("그래머", "영어"),
+        ("listening", "영어"), ("Listening", "영어"), ("리스닝", "영어"),
+        ("writing", "영어"), ("Writing", "영어"), ("라이팅", "영어"),
+        ("speaking", "영어"), ("Speaking", "영어"), ("스피킹", "영어"),
+        ("구문", "영어"), ("영단어", "영어"), ("영문법", "영어"),
+        # 전과목/기타
+        ("진단평가", "전과목"), ("배치고사", "전과목"), ("방학생활", "전과목"),
+        ("전과목", "전과목"),
     ]
     for keyword, subject in subject_map:
         if keyword in title:
@@ -565,7 +589,18 @@ def _parse_subject(title: str) -> str:
 def _parse_grade(title: str) -> str:
     """제목에서 사용학년/단계 추출 (쿠팡 옵션값 형식)"""
     import re as _re
-    # 초등 N-M 패턴
+
+    # 학교급 포함 여부 판별
+    has_elem = bool(_re.search(r'초등|초학', title))
+    has_mid = bool(_re.search(r'중등|중학|중\d', title))
+    has_high = bool(_re.search(r'고등|고교', title))
+
+    # --- 1단계: 명시적 학교급 + 숫자 패턴 ---
+
+    # 초등 N-M (초등 수학 3-1, 초3-1 등)
+    m = _re.search(r'초등?\s*(?:\S+\s+)?(\d)[- .](\d)', title)
+    if m and has_elem:
+        return f"초등 {m.group(1)}-{m.group(2)}"
     m = _re.search(r'초등\s*(\d)[- .](\d)', title)
     if m:
         return f"초등 {m.group(1)}-{m.group(2)}"
@@ -575,37 +610,90 @@ def _parse_grade(title: str) -> str:
     m = _re.search(r'초(\d)[- .](\d)', title)
     if m:
         return f"초등 {m.group(1)}-{m.group(2)}"
-    # 중등
+
+    # 중등 N-M (중등 수학 1-1, 중학 수학 2-1, 중1-2 등)
+    # "중등/중학 + (과목명 등) + N-M" 패턴
+    m = _re.search(r'중(?:등|학)\s+\S+\s+(\d)[- .](\d)', title)
+    if m:
+        return f"중등 {m.group(1)}-{m.group(2)}"
     m = _re.search(r'중(?:등|학)?\s*(\d)[- .](\d)', title)
     if m:
         return f"중등 {m.group(1)}-{m.group(2)}"
     m = _re.search(r'중(?:등|학)?\s*(\d)학년', title)
     if m:
         return f"중등 {m.group(1)}"
-    m = _re.search(r'중(\d)[- .](\d)', title)
-    if m:
-        return f"중등 {m.group(1)}-{m.group(2)}"
-    # 고등
+
+    # 고등 N-M
     m = _re.search(r'고(?:등)?\s*(\d)[- .](\d)', title)
     if m:
         return f"고등 {m.group(1)}-{m.group(2)}"
     m = _re.search(r'고(\d)', title)
     if m:
         return f"고등 {m.group(1)}"
-    # 수능/예비
+
+    # --- 2단계: 학교급 키워드만 있고 숫자는 별도 ---
+
+    # "예비 N학년"
+    m = _re.search(r'예비\s*(\d)학년', title)
+    if m:
+        g = int(m.group(1))
+        if g <= 6:
+            return f"초등 {g}"
+        return f"중등 {g - 6}"
+
+    # "N학년" (학교급 컨텍스트와 결합)
+    m = _re.search(r'(\d)학년', title)
+    if m:
+        g = int(m.group(1))
+        if has_mid and 1 <= g <= 3:
+            return f"중등 {g}"
+        if has_high and 1 <= g <= 3:
+            return f"고등 {g}"
+        if g <= 6:
+            return f"초등 {g}"
+
+    # 학교급 있지만 학년 없이 N-M만 있는 경우 (바빠 교과서 연산 5-1)
+    m = _re.search(r'(\d)[- .]([12])\s*(?:\(|세트|$)', title)
+    if m:
+        g = int(m.group(1))
+        s = m.group(2)
+        if has_mid and 1 <= g <= 3:
+            return f"중등 {g}-{s}"
+        if has_high and 1 <= g <= 3:
+            return f"고등 {g}-{s}"
+        if g <= 6 and not has_mid and not has_high:
+            return f"초등 {g}-{s}"
+
+    # --- 3단계: 수능/예비 ---
     if "수능" in title:
         return "수능"
     if "예비 초등" in title or "예비초등" in title:
         return "예비 초등"
     if "예비 중" in title or "예비중" in title:
         return "예비 중등"
-    # 일반 학교급
-    if "초등" in title:
+
+    # --- 4단계: 학교급만 (숫자 없음) ---
+    if has_elem:
         return "초등"
-    if "중등" in title or "중학" in title:
+    if has_mid:
         return "중등"
-    if "고등" in title or "고교" in title:
+    if has_high:
         return "고등"
+
+    # --- 5단계: 고등 전용 과목명으로 추론 ---
+    _hs_subjects = [
+        "미적분", "확률과통계", "확률과 통계", "기하", "대수", "공통수학",
+        "언어와매체", "언어와 매체", "화법과작문", "화법과 작문",
+        "생명과학", "지구과학", "물리학", "화학",
+        "통합과학", "통합사회",
+        "생활과윤리", "생활과 윤리", "윤리와사상", "윤리와 사상",
+        "사회문화", "사회 문화", "사회·문화",
+        "한국지리", "세계지리", "정치와법", "정치와 법",
+        "동아시아사",
+    ]
+    for hs in _hs_subjects:
+        if hs in title:
+            return "고등"
     return ""
 
 
@@ -636,6 +724,17 @@ def _parse_semester(title: str) -> str:
     if "2학기" in title:
         return "2학기"
     return ""
+
+
+def _dedupe_attributes(attrs: List[Dict]) -> List[Dict]:
+    """속성 중복 제거 — 같은 attributeTypeName이 여러 개면 비어있지 않은 값을 우선 유지"""
+    seen: Dict[str, Dict] = {}
+    for a in attrs:
+        name = a.get("attributeTypeName", "")
+        val = a.get("attributeValueName", "")
+        if name not in seen or (val and val != ""):
+            seen[name] = a
+    return list(seen.values())
 
 
 def _build_book_attributes(isbn: str, publisher: str = "", author: str = "",
@@ -678,7 +777,7 @@ def _build_book_attributes(isbn: str, publisher: str = "", author: str = "",
     attrs.append({"attributeTypeName": "발행언어", "attributeValueName": "한국어"})
     attrs.append({"attributeTypeName": "e북 포함 여부", "attributeValueName": "아니오"})
 
-    return attrs
+    return _dedupe_attributes(attrs)
 
 
 def _build_content_html(title: str, author: str, publisher: str, description: str, image_url: str) -> str:

@@ -24,10 +24,8 @@ os.chdir(project_root)
 from dotenv import load_dotenv
 load_dotenv()
 
-from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from app.config import settings
-from app.database import init_db
+from app.database import engine as _default_engine, init_db
 from app.models.account import Account
 from app.models.listing import Listing
 from scripts.sync_coupang_products import create_wing_client
@@ -55,11 +53,7 @@ def _safe_commit(db, retries=5):
 
 def fill_prices(account_name=None, limit=0):
     init_db()
-    # timeout 설정으로 대시보드 동시접근 충돌 방지
-    db_url = settings.database_url
-    connect_args = {"check_same_thread": False, "timeout": DB_TIMEOUT} if "sqlite" in db_url else {}
-    engine = create_engine(db_url, connect_args=connect_args, echo=False)
-    Session = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    Session = sessionmaker(autocommit=False, autoflush=False, bind=_default_engine)
     db = Session()
 
     try:

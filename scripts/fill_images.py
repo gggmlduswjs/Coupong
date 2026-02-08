@@ -16,11 +16,10 @@ os.chdir(os.path.join(os.path.dirname(__file__), '..'))
 from dotenv import load_dotenv
 load_dotenv()
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 from app.api.coupang_wing_client import CoupangWingClient
 from app.constants import WING_ACCOUNT_ENV_MAP
-
-engine = create_engine('sqlite:///coupang_auto.db')
+from app.database import engine
 isbn_re = re.compile(r'97[89]\d{10}')
 
 

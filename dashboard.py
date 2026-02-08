@@ -8,8 +8,8 @@ import os
 import sys
 import streamlit as st
 import pandas as pd
-from st_aggrid import AgGrid, GridOptionsBuilder
-from sqlalchemy import create_engine, text
+from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode
+from sqlalchemy import text, inspect as sa_inspect
 from sqlalchemy.orm import sessionmaker
 from pathlib import Path
 from datetime import datetime
@@ -24,7 +24,10 @@ from uploaders.coupang_api_uploader import CoupangAPIUploader, _build_book_notic
 from app.constants import (
     WING_ACCOUNT_ENV_MAP, BOOK_CATEGORY_MAP, BOOK_DISCOUNT_RATE,
     COUPANG_FEE_RATE, DEFAULT_SHIPPING_COST, FREE_SHIPPING_THRESHOLD,
+    DEFAULT_STOCK,
     determine_customer_shipping_fee,
+    determine_delivery_charge_type,
+    DISTRIBUTOR_MAP, resolve_distributor, match_publisher_from_text,
 )
 from config.publishers import get_publisher_info
 
@@ -35,20 +38,17 @@ from dotenv import load_dotenv
 load_dotenv(ROOT / ".env")
 
 # ─── DB ───
-DB_PATH = ROOT / "coupang_auto.db"
-engine = create_engine(f"sqlite:///{DB_PATH}", connect_args={"check_same_thread": False, "timeout": 30})
+from app.database import engine, SessionLocal, _is_postgresql, _database_url
+_is_pg = _is_postgresql(_database_url)
 
-# SQLite WAL 모드 + busy_timeout (동시 접근 허용)
-from sqlalchemy import event as _sa_event
-@_sa_event.listens_for(engine, "connect")
-def _set_sqlite_pragma(dbapi_conn, connection_record):
-    cursor = dbapi_conn.cursor()
-    cursor.execute("PRAGMA busy_timeout=30000")
-    try:
-        cursor.execute("PRAGMA journal_mode=WAL")
-    except Exception:
-        pass
-    cursor.close()
+# 위너 컬럼 마이그레이션 (없으면 추가) — SQLite 전용
+if not _is_pg:
+    from app.services.db_migration import SQLiteMigrator as _Migrator
+    _Migrator(engine).add_columns_if_missing("listings", {
+        "winner_status": "VARCHAR(20)",
+        "winner_checked_at": "DATETIME",
+        "item_id": "VARCHAR(50)",
+    })
 
 # ─── 페이지 설정 ───
 st.set_page_config(page_title="쿠팡 도서 자동화", page_icon="📚", layout="wide")
@@ -165,13 +165,20 @@ if page == "상품 관리":
         WHERE coupang_status = 'active' AND stock_quantity <= 3
     """).iloc[0]['c'])
 
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    # 아이템 위너 KPI
+    _winner_cnt = int(query_df("SELECT COUNT(*) as c FROM listings WHERE coupang_status = 'active' AND winner_status = 'winner'").iloc[0]['c'])
+    _not_winner_cnt = int(query_df("SELECT COUNT(*) as c FROM listings WHERE coupang_status = 'active' AND winner_status = 'not_winner'").iloc[0]['c'])
+    _winner_unknown_cnt = _all_active - _winner_cnt - _not_winner_cnt
+
+    c1, c2, c3, c4, c5, c6, c7, c8 = st.columns(8)
     c1.metric("판매중", f"{_all_active:,}개")
     c2.metric("기타", f"{_all_other:,}개")
     c3.metric("출판사", f"{_pub_cnt}개")
     c4.metric("총 판매가", f"₩{_total_sale:,}")
     c5.metric("가격 불일치", f"{_price_diff_cnt}건", delta=f"{_price_diff_cnt}" if _price_diff_cnt > 0 else None, delta_color="inverse")
     c6.metric("재고 부족", f"{_low_stock_cnt}건", delta=f"{_low_stock_cnt}" if _low_stock_cnt > 0 else None, delta_color="inverse")
+    c7.metric("아이템위너", f"{_winner_cnt}건", delta=f"{_winner_cnt}" if _winner_cnt > 0 else None, delta_color="normal")
+    c8.metric("비위너", f"{_not_winner_cnt}건", delta=f"{_not_winner_cnt}" if _not_winner_cnt > 0 else None, delta_color="inverse")
 
     # ── WING 등록현황 KPI (API 키 있는 계정만) ──
     _wing_client = create_wing_client(selected_account) if selected_account is not None else None
@@ -247,13 +254,21 @@ if page == "상품 관리":
 
         _status_counts = query_df("SELECT coupang_status, COUNT(*) as cnt FROM listings WHERE account_id = :acct_id GROUP BY coupang_status", {"acct_id": account_id})
         _sc = dict(zip(_status_counts["coupang_status"], _status_counts["cnt"])) if not _status_counts.empty else {}
-        _k1, _k2, _k3, _k4 = st.columns(4)
+        _winner_acct = query_df("""
+            SELECT COALESCE(winner_status, 'unknown') as ws, COUNT(*) as cnt
+            FROM listings WHERE account_id = :acct_id AND coupang_status = 'active'
+            GROUP BY ws
+        """, {"acct_id": account_id})
+        _wc = dict(zip(_winner_acct["ws"], _winner_acct["cnt"])) if not _winner_acct.empty else {}
+        _k1, _k2, _k3, _k4, _k5, _k6 = st.columns(6)
         _k1.metric("판매중", f"{_sc.get('active', 0):,}건")
         _k2.metric("판매중지", f"{_sc.get('paused', 0):,}건")
         _k3.metric("품절/기타", f"{_sc.get('sold_out', 0) + _sc.get('pending', 0) + _sc.get('rejected', 0):,}건")
         _k4.metric("전체", f"{sum(_sc.values()):,}건")
+        _k5.metric("위너", f"{_wc.get('winner', 0):,}건")
+        _k6.metric("비위너", f"{_wc.get('not_winner', 0):,}건")
 
-        col_f1, col_f2 = st.columns([1, 2])
+        col_f1, col_f2, col_f3 = st.columns([1, 2, 1])
         with col_f1:
             _filter_options = ["판매중", "판매중지", "전체", "대기", "품절", "반려"]
             _filter_map = {"판매중": "active", "판매중지": "paused", "대기": "pending", "품절": "sold_out", "반려": "rejected"}
@@ -261,6 +276,28 @@ if page == "상품 관리":
             status_filter = _filter_map.get(_filter_label, _filter_label)
         with col_f2:
             search_q = st.text_input("검색 (상품명 / ISBN / SKU)", key="lst_search")
+        with col_f3:
+            if st.button("위너 확인", key="btn_winner_sync", help="현재 계정의 active 상품 위너 상태를 API로 확인합니다"):
+                _wc_client = create_wing_client(selected_account)
+                if _wc_client is None:
+                    st.error("WING API 키가 설정되지 않았습니다.")
+                else:
+                    from scripts.sync_item_winner import sync_account_winners as _sync_winners
+                    from app.models.account import Account as _AccModel
+                    _wc_db = SessionLocal()
+                    try:
+                        _wc_acc = _wc_db.query(_AccModel).get(account_id)
+                        if _wc_acc:
+                            _wc_prog = st.progress(0, text="위너 확인 중...")
+                            _wr = _sync_winners(_wc_db, _wc_acc, force=True)
+                            _wc_prog.progress(1.0, text="완료!")
+                            st.success(f"위너 {_wr['winner']}건 / 비위너 {_wr['not_winner']}건 / 미확인 {_wr['unknown']}건 / 에러 {_wr['error']}건")
+                            st.cache_data.clear()
+                            st.rerun()
+                    except Exception as _we:
+                        st.error(f"위너 확인 실패: {_we}")
+                    finally:
+                        _wc_db.close()
 
         where_parts = ["l.account_id = :acct_id"]
         _lst_params = {"acct_id": account_id}
@@ -280,6 +317,7 @@ if page == "상품 관리":
                    COALESCE(l.delivery_charge, 0) as 배송비,
                    COALESCE(l.stock_quantity, 10) as 재고,
                    l.coupang_status as 상태,
+                   l.winner_status as _winner_raw,
                    l.isbn as ISBN,
                    COALESCE(l.brand, '') as 출판사,
                    COALESCE(l.coupang_product_id, '-') as 쿠팡ID,
@@ -474,8 +512,12 @@ if page == "상품 관리":
                 return t or "-"
             listings_df["배송"] = listings_df.apply(_fmt_ship_type, axis=1)
 
+            # 위너 표시 컬럼
+            _winner_map = {"winner": "O", "not_winner": "X"}
+            listings_df["위너"] = listings_df["_winner_raw"].map(lambda v: _winner_map.get(v, "-"))
+
             # 그리드 표시 컬럼 순서
-            _grid_cols = ["상품명", "정가", "판매가", "순마진", "공급율", "배송", "재고", "상태", "ISBN", "출판사", "쿠팡ID", "VID", "등록일"]
+            _grid_cols = ["상품명", "정가", "판매가", "순마진", "공급율", "배송", "재고", "상태", "위너", "ISBN", "출판사", "쿠팡ID", "VID", "등록일"]
             _grid_df = listings_df[_grid_cols]
 
             _cap_col, _dl_col = st.columns([4, 1])
@@ -487,6 +529,7 @@ if page == "상품 관리":
             gb.configure_selection(selection_mode="single", use_checkbox=False)
             gb.configure_column("상품명", minWidth=200)
             gb.configure_column("공급율", width=70)
+            gb.configure_column("위너", width=60)
             gb.configure_grid_options(domLayout="normal")
             grid_resp = AgGrid(
                 _grid_df,
@@ -1190,21 +1233,22 @@ elif page == "신규 등록":
     nr_gb.configure_column("배송", width=100)
     nr_gb.configure_column("등록상태", width=80)
     nr_gb.configure_column("등록", minWidth=150)
-    nr_gb.configure_grid_options(domLayout="normal", suppressRowClickSelection=False)
+    nr_gb.configure_grid_options(domLayout="normal", suppressRowClickSelection=True)
+    _nr_grid_ver = st.session_state.get("nr_grid_ver", 0)
     nr_grid = AgGrid(
         nr_grid_df,
         gridOptions=nr_gb.build(),
-        update_on=["selectionChanged"],
+        update_on=["selectionChanged", "cellClicked"],
         height=400,
         theme="streamlit",
-        key="nr_aggrid",
+        key=f"nr_aggrid_{_nr_grid_ver}",
     )
 
+    # ── 체크박스 선택 → 등록용 (session_state 보존) ──
     nr_selected = nr_grid["selected_rows"]
-    # AgGrid 선택을 session_state에 보존 (버튼 클릭 rerun 시 선택 소실 방지)
     if nr_selected is not None:
-        if len(nr_selected) > 0:
-            _sel_df = nr_selected if isinstance(nr_selected, pd.DataFrame) else pd.DataFrame(nr_selected)
+        _sel_df = nr_selected if isinstance(nr_selected, pd.DataFrame) else pd.DataFrame(nr_selected)
+        if len(_sel_df) > 0:
             st.session_state["nr_sel_titles"] = _sel_df["제목"].tolist()
         else:
             st.session_state["nr_sel_titles"] = []
@@ -1212,13 +1256,25 @@ elif page == "신규 등록":
     sel_idx = [i for i, t in enumerate(display["title"]) if t in _persisted_titles]
     sel_cnt = len(sel_idx)
 
+    # ── 행 클릭 → 상세보기용 (체크박스와 독립) ──
+    _event = nr_grid.get("event_data")
+    if _event and isinstance(_event, dict):
+        _row_data = _event.get("data") or _event.get("rowData")
+        if _row_data and isinstance(_row_data, dict) and _row_data.get("제목"):
+            st.session_state["nr_detail_title"] = _row_data["제목"]
+
     # ── 일괄 승인/거부 버튼 ──
     st.markdown(f"**선택: {sel_cnt}건**")
-    ap1, ap2, ap3 = st.columns([1, 1, 4])
+    ap1, ap2, ap3, ap4 = st.columns([1, 1, 1, 3])
     with ap1:
         btn_bulk_approve = st.button("일괄 승인", type="primary", disabled=(sel_cnt == 0), key="btn_bulk_approve")
     with ap2:
         btn_bulk_reject = st.button("일괄 거부", disabled=(sel_cnt == 0), key="btn_bulk_reject")
+    with ap3:
+        if st.button("선택 초기화", disabled=(sel_cnt == 0), key="btn_nr_clear"):
+            st.session_state["nr_sel_titles"] = []
+            st.session_state["nr_grid_ver"] = _nr_grid_ver + 1
+            st.rerun()
 
     if btn_bulk_approve and sel_cnt > 0:
         pids = [int(display.iloc[i]["product_id"]) for i in sel_idx]
@@ -1237,10 +1293,9 @@ elif page == "신규 등록":
         st.rerun()
 
     # ── 행 클릭 → 상세 보기 ──
-    if nr_selected is not None and len(nr_selected) > 0:
-        _sel_row = nr_selected.iloc[0] if hasattr(nr_selected, "iloc") else pd.Series(nr_selected[0])
-        nr_sel_title = _sel_row["제목"]
-        _match = display[display["title"] == nr_sel_title]
+    _detail_title = st.session_state.get("nr_detail_title")
+    if _detail_title:
+        _match = display[display["title"] == _detail_title]
         if not _match.empty:
             nr_sel = _match.iloc[0]
             book_id_row = query_df("SELECT id, image_url, description, author FROM books WHERE isbn = :isbn LIMIT 1", {"isbn": nr_sel["isbn"]}) if nr_sel["isbn"] else pd.DataFrame()
@@ -1343,6 +1398,7 @@ elif page == "신규 등록":
                             if not book_id_row.empty:
                                 run_sql("DELETE FROM books WHERE id=:id", {"id": int(book_id_row.iloc[0]["id"])})
                             st.success("삭제 완료")
+                            st.session_state.pop("nr_detail_title", None)
                             st.cache_data.clear()
                             st.rerun()
                         except Exception as e:
@@ -1350,7 +1406,7 @@ elif page == "신규 등록":
 
     st.divider()
 
-    # ── 멀티 계정 선택 + 일괄 등록 ──
+    # ── 등록 매트릭스 프리뷰 + 일괄 등록 ──
     _approved_sel_idx = [i for i in sel_idx if display.iloc[i].get("registration_status") == "approved"]
     _approved_cnt = len(_approved_sel_idx)
     _unapproved_cnt = sel_cnt - _approved_cnt
@@ -1360,73 +1416,82 @@ elif page == "신규 등록":
     if not _wing_accounts:
         st.warning("WING API가 활성화된 계정이 없습니다.")
     else:
-        # 선택 상품 기준 계정별 미등록 수 계산
-        _sel_listed_sets = []
-        for i in sel_idx:
-            accs_str = str(display.iloc[i].get("listed_accounts", "") or "")
-            _sel_listed_sets.append(set(a.strip() for a in accs_str.split(",") if a.strip()))
+        # 상품 × 계정 매트릭스 (등록됨=✓ 텍스트, 미등록=체크박스)
+        _selected_pairs = {}  # {mi: [acc_objs]}
+        _total_missing = 0
+        _registered_map = {}
 
-        # 계정별 체크박스 (이미 전체 등록된 계정은 disabled)
-        _nr_selected_accounts = []
-        _acc_cols = st.columns(len(_wing_accounts))
-        for _ci, _acc in enumerate(_wing_accounts):
-            _acc_name = _acc["account_name"]
-            _unlisted = sum(1 for s in _sel_listed_sets if _acc_name not in s) if sel_cnt > 0 else 0
-            _is_full = (_unlisted == 0 and sel_cnt > 0)
-            with _acc_cols[_ci]:
-                _label = f"{_acc_name} ({_unlisted}/{sel_cnt})" if sel_cnt > 0 else _acc_name
-                _checked = st.checkbox(_label, value=not _is_full, disabled=_is_full, key=f"nr_acc_{_acc_name}")
-            if _checked:
-                _nr_selected_accounts.append(_acc)
-        _nr_sel_acc_cnt = len(_nr_selected_accounts)
+        if _approved_cnt > 0:
+            _acc_cnt = len(_wing_accounts)
+            # 헤더
+            _hdr = st.columns([3] + [1] * _acc_cnt)
+            _hdr[0].markdown("**상품명**")
+            for _ai, _acc in enumerate(_wing_accounts):
+                _hdr[_ai + 1].markdown(f"**{_acc['account_name']}**")
 
-        # 등록 정보 요약 (이미 등록된 조합 제외)
-        _sel_acc_names = {a["account_name"] for a in _nr_selected_accounts}
-        _skip_already = 0
-        for i in _approved_sel_idx:
-            accs_str = str(display.iloc[i].get("listed_accounts", "") or "")
-            _already = set(a.strip() for a in accs_str.split(",") if a.strip())
-            _skip_already += len(_already & _sel_acc_names)
-        _total_jobs = _approved_cnt * _nr_sel_acc_cnt - _skip_already
+            for _mi, idx in enumerate(_approved_sel_idx):
+                row = display.iloc[idx]
+                _name = str(row.get("title", ""))[:30]
+                _listed_str = str(row.get("listed_accounts", "") or "")
+                _listed = set(a.strip() for a in _listed_str.split(",") if a.strip())
+
+                _cols = st.columns([3] + [1] * _acc_cnt)
+                _cols[0].write(_name)
+
+                _sel_accs = []
+                _reg_row = {}
+                for _ai, _acc in enumerate(_wing_accounts):
+                    _aname = _acc["account_name"]
+                    _is_reg = _aname in _listed
+                    _reg_row[_aname] = _is_reg
+                    if _is_reg:
+                        _cols[_ai + 1].markdown("✅")
+                    else:
+                        _chk = _cols[_ai + 1].checkbox(
+                            _aname, value=True,
+                            key=f"nr_reg_{_mi}_{_aname}",
+                            label_visibility="collapsed",
+                        )
+                        if _chk:
+                            _sel_accs.append(_acc)
+                            _total_missing += 1
+                _selected_pairs[_mi] = _sel_accs
+                _registered_map[_mi] = _reg_row
+
+            st.caption("✅ = 이미 등록됨 · ☑ = 신규 등록 예정 · 체크 해제 = 등록 제외")
+
+        # 요약 + 버튼
+        _summary_parts = [f"등록 예정 **{_total_missing}건**"]
+        if _unapproved_cnt > 0:
+            _summary_parts.append(f"미승인 {_unapproved_cnt}건 제외")
         cb1, cb2, cb3 = st.columns([3, 1, 3])
         with cb1:
-            _label = f"**상품 {sel_cnt}건** (승인됨: {_approved_cnt}건) x **{_nr_sel_acc_cnt}계정** = **{_total_jobs}건**"
-            if _skip_already > 0:
-                _label += f" | 이미 등록 {_skip_already}건 제외"
-            if _unapproved_cnt > 0:
-                _label += f" | 미승인 {_unapproved_cnt}건 제외"
-            st.markdown(_label)
+            st.markdown(" | ".join(_summary_parts))
         with cb2:
             dry = st.checkbox("Dry Run", value=False, key="dry", help="체크 시 실제 등록 안 하고 확인만")
         with cb3:
             btn = st.button(
-                f"{'테스트' if dry else '쿠팡에 등록'} ({_total_jobs}건)",
-                type="primary", disabled=(_total_jobs == 0 or _nr_sel_acc_cnt == 0),
+                f"{'테스트' if dry else '선택 항목 등록'} ({_total_missing}건)",
+                type="primary", disabled=(_total_missing == 0),
             )
 
-        if btn and _approved_cnt > 0 and _nr_sel_acc_cnt > 0:
+        if btn and _approved_cnt > 0 and _total_missing > 0:
             progress = st.progress(0, text="준비 중...")
             result_box = st.container()
-            ok_list, fail_list, skip_list = [], [], []
+            ok_list, fail_list = [], []
             _done = 0
-            _actual_total = max(_total_jobs, 1)
 
-            for _pi, idx in enumerate(_approved_sel_idx):
+            for _mi, idx in enumerate(_approved_sel_idx):
                 row = display.iloc[idx]
                 pd_data = product_to_upload_data(row)
                 name = pd_data["product_name"]
                 _row_listed = set(a.strip() for a in str(row.get("listed_accounts", "") or "").split(",") if a.strip())
 
-                for _acc in _nr_selected_accounts:
+                for _acc in _selected_pairs.get(_mi, []):
                     _acc_name = _acc["account_name"]
 
-                    # 이미 등록된 계정 스킵
-                    if _acc_name in _row_listed:
-                        skip_list.append({"계정": _acc_name, "제목": name[:35], "결과": "이미 등록됨"})
-                        continue
-
                     _done += 1
-                    progress.progress(min(_done / _actual_total, 1.0), text=f"[{_done}/{_total_jobs}] {_acc_name} — {name[:25]}...")
+                    progress.progress(min(_done / _total_missing, 1.0), text=f"[{_done}/{_total_missing}] {_acc_name} — {name[:25]}...")
 
                     _out_code = str(_acc.get("outbound_shipping_code", ""))
                     _ret_code = str(_acc.get("return_center_code", ""))
@@ -1453,21 +1518,35 @@ elif page == "신규 등록":
                         if res["success"]:
                             sid = res["seller_product_id"]
                             ok_list.append({"계정": _acc_name, "제목": name[:35], "쿠팡ID": sid, "결과": "성공"})
+                            # 배송비 계산
+                            _mr = int(pd_data.get("margin_rate", 65))
+                            _lp = int(pd_data.get("original_price", 0))
+                            _dct, _dc, _fsoa = determine_delivery_charge_type(_mr, _lp)
                             try:
                                 with engine.connect() as conn:
                                     conn.execute(text("""
-                                        INSERT OR IGNORE INTO listings
+                                        INSERT INTO listings
                                         (account_id, product_type, product_id, isbn, coupang_product_id,
                                          coupang_status, sale_price, original_price, product_name,
-                                         shipping_policy, upload_method, uploaded_at)
-                                        VALUES (:aid, 'single', :pid, :isbn, :cid, 'active', :sp, :op, :pn, :ship, 'api', :now)
+                                         shipping_policy, upload_method, uploaded_at,
+                                         stock_quantity, delivery_charge_type, delivery_charge, free_ship_over_amount)
+                                        VALUES (:aid, 'single', :pid, :isbn, :cid, 'active', :sp, :op, :pn, :ship, 'api', :now,
+                                                :stock, :dct, :dc, :fsoa)
+                                        ON CONFLICT DO NOTHING
                                     """), {
                                         "aid": int(_acc["id"]), "pid": int(row["product_id"]),
                                         "isbn": pd_data["isbn"], "cid": sid,
                                         "sp": pd_data["sale_price"], "op": pd_data["original_price"],
                                         "pn": name, "ship": pd_data["shipping_policy"],
                                         "now": datetime.now().isoformat(),
+                                        "stock": DEFAULT_STOCK, "dct": _dct, "dc": _dc, "fsoa": _fsoa,
                                     })
+                                    # 이번 등록 반영 → 전 계정 완료 여부 체크
+                                    _row_listed.add(_acc_name)
+                                    if len(_row_listed) >= _wing_account_cnt:
+                                        conn.execute(text(
+                                            "UPDATE products SET status = 'uploaded' WHERE id = :id"
+                                        ), {"id": int(row["product_id"])})
                                     conn.commit()
                             except Exception as db_e:
                                 logger.warning(f"DB 저장 실패 ({_acc_name}): {db_e}")
@@ -1479,8 +1558,6 @@ elif page == "신규 등록":
                 if ok_list:
                     st.success(f"성공: {len(ok_list)}건")
                     st.dataframe(pd.DataFrame(ok_list), width="stretch", hide_index=True)
-                if skip_list:
-                    st.info(f"이미 등록 (스킵): {len(skip_list)}건")
                 if fail_list:
                     st.error(f"실패: {len(fail_list)}건")
                     st.dataframe(pd.DataFrame(fail_list), width="stretch", hide_index=True)
@@ -2212,14 +2289,19 @@ elif page == "수동 등록":
                     if _res["success"]:
                         _sid = _res["seller_product_id"]
                         _ok_list.append({"계정": _acc_name, "쿠팡ID": _sid, "결과": "성공"})
+                        # 배송비 계산
+                        _m_dct, _m_dc, _m_fsoa = determine_delivery_charge_type(_pub_margin, _m_list_price)
                         try:
                             with engine.connect() as conn:
                                 conn.execute(text("""
-                                    INSERT OR IGNORE INTO listings
+                                    INSERT INTO listings
                                     (account_id, product_type, isbn, coupang_product_id,
                                      coupang_status, sale_price, original_price, product_name,
-                                     shipping_policy, upload_method, uploaded_at)
-                                    VALUES (:aid, 'single', :isbn, :cid, 'active', :sp, :op, :pn, :ship, 'api', :now)
+                                     shipping_policy, upload_method, uploaded_at,
+                                     stock_quantity, delivery_charge_type, delivery_charge, free_ship_over_amount)
+                                    VALUES (:aid, 'single', :isbn, :cid, 'active', :sp, :op, :pn, :ship, 'api', :now,
+                                            :stock, :dct, :dc, :fsoa)
+                                    ON CONFLICT DO NOTHING
                                 """), {
                                     "aid": int(_acc["id"]),
                                     "isbn": _m_isbn,
@@ -2229,6 +2311,7 @@ elif page == "수동 등록":
                                     "pn": _m_title,
                                     "ship": _shipping_policy,
                                     "now": datetime.now().isoformat(),
+                                    "stock": DEFAULT_STOCK, "dct": _m_dct, "dc": _m_dc, "fsoa": _m_fsoa,
                                 })
                                 conn.commit()
                         except Exception as _db_e:
@@ -2288,41 +2371,42 @@ elif page == "매출":
     prev_from_str = prev_date_from.isoformat()
     prev_to_str = prev_date_to.isoformat()
 
-    # revenue_history 테이블 보장
-    with engine.connect() as _conn:
-        _conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS revenue_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                account_id INTEGER NOT NULL REFERENCES accounts(id),
-                order_id BIGINT NOT NULL,
-                sale_type VARCHAR(10) NOT NULL,
-                sale_date DATE NOT NULL,
-                recognition_date DATE NOT NULL,
-                settlement_date DATE,
-                product_id BIGINT,
-                product_name VARCHAR(500),
-                vendor_item_id BIGINT,
-                vendor_item_name VARCHAR(500),
-                sale_price INTEGER DEFAULT 0,
-                quantity INTEGER DEFAULT 0,
-                coupang_discount INTEGER DEFAULT 0,
-                sale_amount INTEGER DEFAULT 0,
-                seller_discount INTEGER DEFAULT 0,
-                service_fee INTEGER DEFAULT 0,
-                service_fee_vat INTEGER DEFAULT 0,
-                service_fee_ratio REAL,
-                settlement_amount INTEGER DEFAULT 0,
-                delivery_fee_amount INTEGER DEFAULT 0,
-                delivery_fee_settlement INTEGER DEFAULT 0,
-                listing_id INTEGER REFERENCES listings(id),
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(account_id, order_id, vendor_item_id)
-            )
-        """))
-        _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_rev_account_date ON revenue_history(account_id, recognition_date)"))
-        _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_rev_recognition ON revenue_history(recognition_date)"))
-        _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_rev_listing ON revenue_history(listing_id)"))
-        _conn.commit()
+    # revenue_history 테이블 보장 (SQLite 전용 — Supabase에는 이미 존재)
+    if not _is_pg:
+        with engine.connect() as _conn:
+            _conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS revenue_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    account_id INTEGER NOT NULL REFERENCES accounts(id),
+                    order_id BIGINT NOT NULL,
+                    sale_type VARCHAR(10) NOT NULL,
+                    sale_date DATE NOT NULL,
+                    recognition_date DATE NOT NULL,
+                    settlement_date DATE,
+                    product_id BIGINT,
+                    product_name VARCHAR(500),
+                    vendor_item_id BIGINT,
+                    vendor_item_name VARCHAR(500),
+                    sale_price INTEGER DEFAULT 0,
+                    quantity INTEGER DEFAULT 0,
+                    coupang_discount INTEGER DEFAULT 0,
+                    sale_amount INTEGER DEFAULT 0,
+                    seller_discount INTEGER DEFAULT 0,
+                    service_fee INTEGER DEFAULT 0,
+                    service_fee_vat INTEGER DEFAULT 0,
+                    service_fee_ratio REAL,
+                    settlement_amount INTEGER DEFAULT 0,
+                    delivery_fee_amount INTEGER DEFAULT 0,
+                    delivery_fee_settlement INTEGER DEFAULT 0,
+                    listing_id INTEGER REFERENCES listings(id),
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(account_id, order_id, vendor_item_id)
+                )
+            """))
+            _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_rev_account_date ON revenue_history(account_id, recognition_date)"))
+            _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_rev_recognition ON revenue_history(recognition_date)"))
+            _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_rev_listing ON revenue_history(listing_id)"))
+            _conn.commit()
 
     # 동기화 실행
     if btn_sync:
@@ -3226,41 +3310,42 @@ elif page == "정산":
         else:
             return f"₩{val:,}"
 
-    # settlement_history 테이블 보장
-    with engine.connect() as _conn:
-        _conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS settlement_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                account_id INTEGER NOT NULL REFERENCES accounts(id),
-                year_month VARCHAR(7) NOT NULL,
-                settlement_type VARCHAR(20),
-                settlement_date VARCHAR(10),
-                settlement_status VARCHAR(20),
-                revenue_date_from VARCHAR(10),
-                revenue_date_to VARCHAR(10),
-                total_sale INTEGER DEFAULT 0,
-                service_fee INTEGER DEFAULT 0,
-                settlement_target_amount INTEGER DEFAULT 0,
-                settlement_amount INTEGER DEFAULT 0,
-                last_amount INTEGER DEFAULT 0,
-                pending_released_amount INTEGER DEFAULT 0,
-                seller_discount_coupon INTEGER DEFAULT 0,
-                downloadable_coupon INTEGER DEFAULT 0,
-                seller_service_fee INTEGER DEFAULT 0,
-                courantee_fee INTEGER DEFAULT 0,
-                deduction_amount INTEGER DEFAULT 0,
-                debt_of_last_week INTEGER DEFAULT 0,
-                final_amount INTEGER DEFAULT 0,
-                bank_name VARCHAR(50),
-                bank_account VARCHAR(50),
-                raw_json TEXT,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(account_id, year_month, settlement_type, settlement_date)
-            )
-        """))
-        _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_settle_account_month ON settlement_history(account_id, year_month)"))
-        _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_settle_month ON settlement_history(year_month)"))
-        _conn.commit()
+    # settlement_history 테이블 보장 (SQLite 전용 — Supabase에는 이미 존재)
+    if not _is_pg:
+        with engine.connect() as _conn:
+            _conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS settlement_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    account_id INTEGER NOT NULL REFERENCES accounts(id),
+                    year_month VARCHAR(7) NOT NULL,
+                    settlement_type VARCHAR(20),
+                    settlement_date VARCHAR(10),
+                    settlement_status VARCHAR(20),
+                    revenue_date_from VARCHAR(10),
+                    revenue_date_to VARCHAR(10),
+                    total_sale INTEGER DEFAULT 0,
+                    service_fee INTEGER DEFAULT 0,
+                    settlement_target_amount INTEGER DEFAULT 0,
+                    settlement_amount INTEGER DEFAULT 0,
+                    last_amount INTEGER DEFAULT 0,
+                    pending_released_amount INTEGER DEFAULT 0,
+                    seller_discount_coupon INTEGER DEFAULT 0,
+                    downloadable_coupon INTEGER DEFAULT 0,
+                    seller_service_fee INTEGER DEFAULT 0,
+                    courantee_fee INTEGER DEFAULT 0,
+                    deduction_amount INTEGER DEFAULT 0,
+                    debt_of_last_week INTEGER DEFAULT 0,
+                    final_amount INTEGER DEFAULT 0,
+                    bank_name VARCHAR(50),
+                    bank_account VARCHAR(50),
+                    raw_json TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(account_id, year_month, settlement_type, settlement_date)
+                )
+            """))
+            _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_settle_account_month ON settlement_history(account_id, year_month)"))
+            _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_settle_month ON settlement_history(year_month)"))
+            _conn.commit()
 
     # ── 상단 컨트롤 ──
     from scripts.sync_settlement import SettlementSync
@@ -3537,327 +3622,589 @@ elif page == "주문":
     st.title("주문 관리")
 
     from datetime import date, timedelta
+    import re as _re
+    import io as _io
 
-    # ── 상단 컨트롤 ──
-    _ord_ctrl1, _ord_ctrl2, _ord_ctrl3, _ord_ctrl4 = st.columns([2, 2, 2, 2])
+    # ── WING API 실시간 주문 조회 ──
+    _LIVE_CACHE_TTL = 120  # 2분 캐시
+
+    def _fetch_live_orders(status):
+        """WING API에서 전 계정 실시간 주문 조회 (session_state 캐시)"""
+        cache_key = f"_live_{status}"
+        ts_key = f"_live_{status}_ts"
+        now = datetime.utcnow().timestamp()
+
+        if cache_key in st.session_state and (now - st.session_state.get(ts_key, 0)) < _LIVE_CACHE_TTL:
+            return st.session_state[cache_key]
+
+        rows = []
+        # API는 32일 제한 → 30일씩 2구간으로 분할
+        _today = date.today()
+        _ranges = [
+            ((_today - timedelta(days=60)).isoformat(), (_today - timedelta(days=30)).isoformat()),
+            ((_today - timedelta(days=30)).isoformat(), _today.isoformat()),
+        ]
+
+        for _, acct in accounts_df.iterrows():
+            client = create_wing_client(acct)
+            if not client:
+                continue
+            ordersheets = []
+            for _rf, _rt in _ranges:
+                try:
+                    ordersheets.extend(client.get_all_ordersheets(_rf, _rt, status=status))
+                except Exception:
+                    continue
+
+            for os_data in ordersheets:
+                shipment_box_id = os_data.get("shipmentBoxId")
+                order_id = os_data.get("orderId")
+                if not shipment_box_id:
+                    continue
+                receiver = os_data.get("receiver") or {}
+                ordered_at = str(os_data.get("orderedAt", ""))[:10]
+                order_items = os_data.get("orderItems", [])
+                if not order_items:
+                    order_items = [os_data]
+                for item in order_items:
+                    rows.append({
+                        "계정": acct["account_name"],
+                        "묶음배송번호": int(shipment_box_id),
+                        "주문번호": int(order_id),
+                        "상품명": item.get("sellerProductName") or os_data.get("sellerProductName", ""),
+                        "옵션명": item.get("vendorItemName", ""),
+                        "수량": int(item.get("shippingCount", 0) or 0),
+                        "결제금액": int(item.get("orderPrice", 0) or 0),
+                        "주문일": ordered_at,
+                        "수취인": receiver.get("name", ""),
+                        "상태": status,
+                        "택배사": item.get("deliveryCompanyName") or os_data.get("deliveryCompanyName", ""),
+                        "운송장번호": item.get("invoiceNumber") or os_data.get("invoiceNumber", ""),
+                        "배송완료일": str(os_data.get("deliveredDate") or "")[:10],
+                        "취소": bool(item.get("canceled")),
+                        "_account_id": int(acct["id"]),
+                        "_vendor_item_id": int(item.get("vendorItemId", 0) or 0),
+                        "_seller_product_id": item.get("sellerProductId") or os_data.get("sellerProductId", ""),
+                        "_order_price_raw": int(item.get("orderPrice", 0) or 0),
+                    })
+
+        df = pd.DataFrame(rows) if rows else pd.DataFrame()
+        st.session_state[cache_key] = df
+        st.session_state[ts_key] = now
+        return df
+
+    def _fetch_all_live_orders():
+        """ACCEPT + INSTRUCT 실시간 주문 조회 (concat)"""
+        cache_key = "_live_ALL"
+        ts_key = "_live_ALL_ts"
+        now = datetime.utcnow().timestamp()
+
+        if cache_key in st.session_state and (now - st.session_state.get(ts_key, 0)) < _LIVE_CACHE_TTL:
+            return st.session_state[cache_key]
+
+        frames = []
+        for _s in ["ACCEPT", "INSTRUCT"]:
+            _df = _fetch_live_orders(_s)
+            if not _df.empty:
+                frames.append(_df)
+        result = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        st.session_state[cache_key] = result
+        st.session_state[ts_key] = now
+        return result
+
+    # ── 상단 컨트롤 (종합 탭 기간) ──
+    _ord_ctrl1, _ord_ctrl2 = st.columns([3, 1])
     with _ord_ctrl1:
-        _ord_acct = st.selectbox("계정", ["전체"] + account_names, key="ord_acct")
+        _ord_period = st.selectbox("종합 탭 기간", ["당일", "7일", "14일", "30일", "60일"], key="ord_period", index=1)
     with _ord_ctrl2:
-        _ord_period = st.selectbox("기간", ["당일", "7일", "14일", "30일", "60일"], key="ord_period")
-    with _ord_ctrl3:
-        _ord_status_filter = st.selectbox("상태", ["전체", "ACCEPT", "INSTRUCT", "DEPARTURE", "DELIVERING", "FINAL_DELIVERY", "NONE_TRACKING"], key="ord_status")
-    with _ord_ctrl4:
         st.markdown("<br>", unsafe_allow_html=True)
-        _btn_ord_sync = st.button("주문 동기화", type="primary", key="btn_ord_sync", use_container_width=True)
+        if st.button("캐시 새로고침", key="btn_live_refresh"):
+            for _k in list(st.session_state.keys()):
+                if _k.startswith("_live_"):
+                    del st.session_state[_k]
+            st.rerun()
 
-    # 기간 계산
+    # 기간 계산 (종합 탭용)
     _ord_days = 0 if _ord_period == "당일" else int(_ord_period.replace("일", ""))
     _ord_date_to = date.today()
     _ord_date_from = _ord_date_to if _ord_days == 0 else _ord_date_to - timedelta(days=_ord_days)
     _ord_date_from_str = _ord_date_from.isoformat()
     _ord_date_to_str = _ord_date_to.isoformat()
 
-    # 계정/상태 WHERE 절
-    _ord_acct_where = ""
-    _ord_acct_params = {}
-    if _ord_acct != "전체":
-        _ord_acct_where = "AND o.account_id = (SELECT id FROM accounts WHERE account_name = :acct_name)"
-        _ord_acct_params["acct_name"] = _ord_acct
+    def _filter_orders_by_date(df, date_from_str, date_to_str):
+        """DataFrame의 '주문일' 컬럼으로 기간 필터링"""
+        if df.empty:
+            return df
+        return df[(df["주문일"] >= date_from_str) & (df["주문일"] <= date_to_str)]
 
-    _ord_status_where = ""
-    if _ord_status_filter != "전체":
-        _ord_status_where = f"AND o.status = '{_ord_status_filter}'"
+    # ── 상태 한글 매핑 (공통) ──
+    _status_map = {
+        "ACCEPT": "결제완료", "INSTRUCT": "상품준비중", "DEPARTURE": "출고완료",
+        "DELIVERING": "배송중", "FINAL_DELIVERY": "배송완료", "NONE_TRACKING": "추적불가",
+    }
 
-    _ord_date_where = f"AND o.ordered_at >= '{_ord_date_from_str}' AND o.ordered_at <= '{_ord_date_to_str} 23:59:59'"
+    def _ord_fmt_krw(val):
+        val = int(val)
+        if abs(val) >= 100_000_000:
+            return f"{val / 100_000_000:.1f}억"
+        elif abs(val) >= 10_000:
+            return f"{val / 10_000:.0f}만"
+        else:
+            return f"{val:,}"
 
-    # 동기화 실행
-    if _btn_ord_sync:
-        with st.spinner("주문 데이터 동기화 중..."):
-            try:
-                from scripts.sync_orders import OrderSync
-                _ord_syncer = OrderSync()
-                _sync_acct = _ord_acct if _ord_acct != "전체" else None
-                _ord_progress = st.progress(0, text="동기화 시작...")
-                def _ord_progress_cb(current, total, msg):
-                    if total > 0:
-                        _ord_progress.progress(current / total, text=msg)
-                _ord_results = _ord_syncer.sync_all(
-                    days=_ord_days,
-                    account_name=_sync_acct,
-                    progress_callback=_ord_progress_cb,
-                )
-                _total_f = sum(r["fetched"] for r in _ord_results)
-                _total_u = sum(r["upserted"] for r in _ord_results)
-                st.success(f"동기화 완료! 조회 {_total_f:,}건, 저장 {_total_u:,}건")
-                st.cache_data.clear()
-            except Exception as e:
-                st.error(f"동기화 오류: {e}")
+    # ── 도서명 정리 함수 ──
+    def _clean_book_name(name: str) -> str:
+        """발주서용 도서명 정리: 노이즈 제거"""
+        s = str(name or "").strip()
+        # (사은품) 태그
+        s = _re.sub(r'^\(사은품\)\s*', '', s)
+        # 연도 패턴: (2026년), (2026), 2026년, 앞에 붙은 2026 등
+        s = _re.sub(r'\(\d{4}년?\)', '', s)
+        s = _re.sub(r'\(\d{4}학년도[^)]*\)', '', s)
+        s = _re.sub(r'\(\d{4}\s*개정[^)]*\)', '', s)
+        s = _re.sub(r'\(\d{4}년?\s*수능대비\)', '', s)
+        s = _re.sub(r'\d{4}학년도\s*', '', s)
+        s = _re.sub(r'^\d{4}\s+', '', s)  # 맨 앞 연도
+        s = _re.sub(r'\d{4}년\s*', '', s)
+        # 수능대비 등
+        s = _re.sub(r'\(?\d{4}\s*수능대비\)?', '', s)
+        # +사은품, +선물, +증정, 사은품증정
+        s = _re.sub(r'\+사은품.*$', '', s)
+        s = _re.sub(r'\+선물.*$', '', s)
+        s = _re.sub(r'\+증정.*$', '', s)
+        s = _re.sub(r'사은품증정', '', s)
+        s = _re.sub(r'\+\s*사은품', '', s)
+        # 전N권
+        s = _re.sub(r'\(전\d+권\)', '', s)
+        s = _re.sub(r'전\d+권', '', s)
+        # [출판사] 대괄호 태그
+        s = _re.sub(r'\s*\[[^\]]*\]', '', s)
+        # 동영상 강의 무료 등 부가 문구
+        s = _re.sub(r'\+\s*동영상.*$', '', s)
+        # - 출판사명 제공/적용
+        s = _re.sub(r'\s*-\s*\S+제공.*$', '', s)
+        s = _re.sub(r'\s*-\s*\S+적용.*$', '', s)
+        # 공백 정리
+        s = _re.sub(r'\s{2,}', ' ', s).strip()
+        s = s.rstrip('-').rstrip('+').strip()
+        return s if s else str(name or "").strip()
 
-    # ── 테이블 존재 확인 ──
-    _ord_table_exists = False
-    try:
-        _ord_check = query_df("SELECT name FROM sqlite_master WHERE type='table' AND name='orders'")
-        _ord_table_exists = not _ord_check.empty
-    except Exception:
-        pass
-
-    if not _ord_table_exists:
-        st.info("orders 테이블이 없습니다. '주문 동기화' 버튼을 눌러 데이터를 가져오세요.")
-    else:
-        # ── KPI 카드 ──
-        _ord_kpi_sql_base = f"""
-            FROM orders o
-            WHERE 1=1 {_ord_acct_where} {_ord_date_where}
-        """
-
-        _ord_total = int(query_df(f"SELECT COUNT(*) as c {_ord_kpi_sql_base}", _ord_acct_params).iloc[0]["c"])
-        _ord_total_sales = int(query_df(f"SELECT COALESCE(SUM(o.order_price), 0) as s {_ord_kpi_sql_base}", _ord_acct_params).iloc[0]["s"])
-        _ord_delivered = int(query_df(f"SELECT COUNT(*) as c {_ord_kpi_sql_base} AND o.status = 'FINAL_DELIVERY'", _ord_acct_params).iloc[0]["c"])
-        _ord_canceled = int(query_df(f"SELECT COUNT(*) as c {_ord_kpi_sql_base} AND (o.canceled = 1 OR o.cancel_count > 0)", _ord_acct_params).iloc[0]["c"])
-
-        _ord_delivery_pct = ((_ord_delivered / _ord_total * 100) if _ord_total > 0 else 0)
-
-        def _ord_fmt_krw(val):
-            val = int(val)
-            if abs(val) >= 100_000_000:
-                return f"{val / 100_000_000:.1f}억"
-            elif abs(val) >= 10_000:
-                return f"{val / 10_000:.0f}만"
+    # ── 세트 분리 함수 ──
+    def _split_set_name(name: str) -> list:
+        """세트 상품명 → 개별 도서명 리스트"""
+        if '+' not in name:
+            return [name]
+        clean = name
+        clean = _re.sub(r'\(사은품\)\s*', '', clean)
+        clean = _re.sub(r'\+선물', '', clean)
+        clean = _re.sub(r'\+사은품', '', clean)
+        clean = _re.sub(r'\+증정', '', clean)
+        clean = _re.sub(r'\(전\d+권\)', '', clean)
+        clean = _re.sub(r'전\d+권', '', clean)
+        clean = _re.sub(r'\(\d{4}년?\)', '', clean)
+        clean = _re.sub(r'\(2022\s*개정[^)]*\)', '', clean)
+        clean = _re.sub(r'사은품증정', '', clean)
+        _shared_suffix = ""
+        _set_match = _re.search(r'세트\s*[-–]?\s*(.+)$', clean)
+        if _set_match:
+            _suffix_candidate = _set_match.group(1).strip()
+            _suffix_clean = _re.sub(r'\d{4}년', '', _suffix_candidate).strip()
+            _suffix_clean = _re.sub(r'\(.*?\)', '', _suffix_clean).strip()
+            _suffix_clean = _suffix_clean.rstrip('-').strip()
+            _suffix_clean = _re.sub(r'\s*-\s*\S+제공.*$', '', _suffix_clean)
+            _suffix_clean = _re.sub(r'\s*-\s*\S+적용.*$', '', _suffix_clean)
+            if 2 <= len(_suffix_clean) <= 15 and not _re.match(r'^[\d\s\-]+$', _suffix_clean):
+                _shared_suffix = _suffix_clean
+        clean = _re.sub(r'\s*세트\s*[-–]?\s*.*$', '', clean)
+        clean = _re.sub(r'\d{4}년', '', clean)
+        clean = clean.strip().rstrip('-').strip()
+        if '+' not in clean:
+            return [name]
+        parts = [p.strip() for p in clean.split('+') if p.strip()]
+        if len(parts) < 2:
+            return [name]
+        result = [parts[0]]
+        for p in parts[1:]:
+            if _re.match(r'^[\d\-]+$', p.strip()):
+                prefix = _re.sub(r'\s*\d+[\-]\d+\s*$', '', parts[0]).strip()
+                if not prefix:
+                    prefix = _re.sub(r'\s+\d+\s*$', '', parts[0]).strip()
+                result.append(f"{prefix} {p.strip()}")
             else:
-                return f"{val:,}"
+                result.append(p)
+        if _shared_suffix:
+            result = [f"{r} {_shared_suffix}" if _shared_suffix not in r else r for r in result]
+        if len(result) >= 2:
+            first = result[0]
+            words = first.rsplit(' ', 1)
+            base_prefix = words[0] if len(words) > 1 else ""
+            if base_prefix and len(base_prefix) > 4:
+                for i in range(1, len(result)):
+                    if len(result[i]) <= 4 and not _re.search(r'\d', result[i]):
+                        result[i] = f"{base_prefix} {result[i]}"
+        return result
 
-        k1, k2, k3, k4 = st.columns(4)
-        k1.metric("총 주문 수", f"{_ord_total:,}건")
-        k2.metric("총 매출액", f"₩{_ord_fmt_krw(_ord_total_sales)}")
-        k3.metric("배송완료율", f"{_ord_delivery_pct:.1f}%")
-        k4.metric("취소/환불", f"{_ord_canceled:,}건")
+    # ── 3개 탭 ──
+    _ord_tab1, _ord_tab2, _ord_tab3 = st.tabs(["결제완료", "상품준비중", "종합"])
+
+    # ══════════════════════════════════════
+    # 탭1: 결제완료 (ACCEPT) — WING API 실시간
+    # ══════════════════════════════════════
+    with _ord_tab1:
+        st.caption("WING API 실시간 조회 (2분 캐시)")
+
+        with st.spinner("결제완료 주문 조회 중..."):
+            _accept_all = _fetch_live_orders("ACCEPT")
+
+        _accept_total = len(_accept_all)
+        _accept_amount = int(_accept_all["결제금액"].sum()) if not _accept_all.empty else 0
+        _accept_by_acct = _accept_all.groupby("계정").size().to_dict() if not _accept_all.empty else {}
+
+        _ak1, _ak2 = st.columns(2)
+        _ak1.metric("결제완료 주문", f"{_accept_total:,}건")
+        _ak2.metric("총 금액", f"₩{_ord_fmt_krw(_accept_amount)}")
+
+        if _accept_by_acct:
+            _acct_breakdown = " | ".join([f"{k}: {v}건" for k, v in sorted(_accept_by_acct.items())])
+            st.caption(f"계정별: {_acct_breakdown}")
 
         st.divider()
 
-        # ── 일별 주문 추이 ──
-        _ord_daily = query_df(f"""
-            SELECT DATE(o.ordered_at) as 날짜,
-                   COUNT(*) as 주문수,
-                   COALESCE(SUM(o.order_price), 0) as 매출액
-            {_ord_kpi_sql_base}
-            GROUP BY DATE(o.ordered_at)
-            ORDER BY 날짜
-        """, _ord_acct_params)
+        if _accept_all.empty:
+            st.info("결제완료(ACCEPT) 상태의 주문이 없습니다.")
+        else:
+            _accept_display = _accept_all[["계정", "묶음배송번호", "주문번호", "상품명", "옵션명", "수량", "결제금액", "주문일", "수취인"]].copy()
+            _accept_display["결제금액"] = _accept_display["결제금액"].apply(lambda x: f"{int(x):,}" if pd.notna(x) else "0")
 
-        if not _ord_daily.empty:
-            import plotly.graph_objects as go
-            from plotly.subplots import make_subplots
+            gb = GridOptionsBuilder.from_dataframe(_accept_display)
+            gb.configure_pagination(paginationAutoPageSize=False, paginationPageSize=20)
+            gb.configure_default_column(resizable=True, sorteable=True, filterable=True)
+            gb.configure_column("상품명", width=250)
+            gb.configure_column("옵션명", width=200)
+            grid_opts = gb.build()
+            AgGrid(_accept_display, gridOptions=grid_opts, height=450, theme="streamlit", key="accept_grid")
 
-            _ord_fig = make_subplots(specs=[[{"secondary_y": True}]])
-            _ord_fig.add_trace(
-                go.Bar(x=_ord_daily["날짜"], y=_ord_daily["주문수"], name="주문 수", marker_color="#636EFA"),
-                secondary_y=False,
-            )
-            _ord_fig.add_trace(
-                go.Scatter(x=_ord_daily["날짜"], y=_ord_daily["매출액"], name="매출액", line=dict(color="#EF553B", width=2)),
-                secondary_y=True,
-            )
-            _ord_fig.update_layout(
-                title="일별 주문 추이",
-                height=350,
-                margin=dict(l=20, r=20, t=40, b=20),
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-            )
-            _ord_fig.update_yaxes(title_text="주문 수", secondary_y=False)
-            _ord_fig.update_yaxes(title_text="매출액 (원)", secondary_y=True)
-            st.plotly_chart(_ord_fig, use_container_width=True)
+            st.divider()
 
-        st.divider()
+            st.info("전체 계정의 ACCEPT 주문을 상품준비중(INSTRUCT)으로 일괄 변경합니다.")
+            _ack_unique = _accept_all[["계정", "묶음배송번호"]].drop_duplicates()
+            _ack_total_count = len(_ack_unique)
 
-        # ── 3개 탭 ──
-        _ord_tab1, _ord_tab2, _ord_tab3 = st.tabs(["주문 목록", "상태별 분석", "배송 관리"])
+            if st.button(f"전체 상품준비중 처리 ({_ack_total_count}건)", type="primary", key="btn_ack_all_v2"):
+                _acct_groups = _accept_all.groupby("_account_id")
+                _total_success = 0
+                _total_fail = 0
 
-        # ── 탭1: 주문 목록 ──
-        with _ord_tab1:
-            _ord_list = query_df(f"""
-                SELECT
-                    a.account_name as 계정,
-                    o.order_id as 주문번호,
-                    o.shipment_box_id as 묶음배송번호,
-                    DATE(o.ordered_at) as 주문일,
-                    o.seller_product_name as 상품명,
-                    o.vendor_item_name as 옵션명,
-                    o.shipping_count as 수량,
-                    o.order_price as 결제금액,
-                    o.status as 상태,
-                    o.delivery_company_name as 택배사,
-                    o.invoice_number as 운송장번호,
-                    DATE(o.delivered_date) as 배송완료일,
-                    o.receiver_name as 수취인
-                FROM orders o
-                JOIN accounts a ON o.account_id = a.id
-                WHERE 1=1 {_ord_acct_where} {_ord_status_where} {_ord_date_where}
-                ORDER BY o.ordered_at DESC
-                LIMIT 500
-            """, _ord_acct_params)
+                for _aid, _grp in _acct_groups:
+                    _acct_name = _grp.iloc[0]["계정"]
+                    _acct_row = accounts_df[accounts_df["id"] == _aid]
+                    if _acct_row.empty:
+                        st.error(f"[{_acct_name}] 계정 정보를 찾을 수 없습니다.")
+                        continue
+                    _client = create_wing_client(_acct_row.iloc[0])
+                    if not _client:
+                        st.error(f"[{_acct_name}] WING API 클라이언트 생성 실패")
+                        continue
 
-            if _ord_list.empty:
-                st.info("해당 조건의 주문이 없습니다.")
+                    _ack_ids = _grp["묶음배송번호"].unique().tolist()
+                    try:
+                        _ack_result = _client.acknowledge_ordersheets([int(x) for x in _ack_ids])
+
+                        _success_ids = []
+                        _fail_items = []
+                        if isinstance(_ack_result, dict) and "data" in _ack_result:
+                            _resp_data = _ack_result["data"]
+                            _resp_code = _resp_data.get("responseCode")
+                            _resp_list = _resp_data.get("responseList", [])
+
+                            for _item in _resp_list:
+                                if _item.get("succeed"):
+                                    _success_ids.append(_item["shipmentBoxId"])
+                                else:
+                                    _fail_items.append(_item)
+
+                            if _resp_code == 0:
+                                st.success(f"[{_acct_name}] 완료: {len(_success_ids)}건")
+                            elif _resp_code == 1:
+                                st.warning(f"[{_acct_name}] 부분 성공: {len(_success_ids)}건 성공, {len(_fail_items)}건 실패")
+                                for _fi in _fail_items:
+                                    st.error(f"  {_fi.get('shipmentBoxId')}: {_fi.get('resultMessage', '')}")
+                            elif _resp_code == 99:
+                                st.error(f"[{_acct_name}] 전체 실패: {_resp_data.get('responseMessage', '')}")
+                            else:
+                                _success_ids = [int(x) for x in _ack_ids]
+                                st.success(f"[{_acct_name}] 완료: {len(_success_ids)}건")
+                        else:
+                            _success_ids = [int(x) for x in _ack_ids]
+                            st.success(f"[{_acct_name}] 완료: {len(_success_ids)}건")
+
+                        _total_success += len(_success_ids)
+                        _total_fail += len(_fail_items)
+
+                    except CoupangWingError as e:
+                        st.error(f"[{_acct_name}] API 오류: {e}")
+                        _total_fail += len(_ack_ids)
+
+                if _total_success > 0:
+                    # 캐시 무효화 → 다음 로드에서 새로 조회
+                    for _k in list(st.session_state.keys()):
+                        if _k.startswith("_live_"):
+                            del st.session_state[_k]
+                    st.rerun()
+
+    # ══════════════════════════════════════
+    # 탭2: 상품준비중 (INSTRUCT) — WING API 실시간
+    # ══════════════════════════════════════
+    with _ord_tab2:
+            st.caption("WING API 실시간 조회 — 상품준비중 주문: 발주서 생성 → 송장 업로드")
+
+            # ── 섹션 1: 상품준비중 목록 ──
+            st.subheader("상품준비중 목록")
+
+            with st.spinner("상품준비중 주문 조회 중..."):
+                _instruct_live = _fetch_live_orders("INSTRUCT")
+            _instruct_all = _instruct_live[~_instruct_live["취소"]].copy() if not _instruct_live.empty else pd.DataFrame()
+
+            # 묶음배송 단위로 집계 (주문 기준)
+            if not _instruct_all.empty:
+                _inst_by_box = _instruct_all.groupby(["계정", "묶음배송번호", "주문번호", "주문일", "수취인"]).agg(
+                    상품명=("상품명", lambda x: " / ".join(x.unique())),
+                    수량=("수량", "sum"),
+                    결제금액=("_order_price_raw", "sum"),
+                ).reset_index()
             else:
-                # 상태 한글 매핑
-                _status_map = {
-                    "ACCEPT": "결제완료",
-                    "INSTRUCT": "상품준비중",
-                    "DEPARTURE": "출고완료",
-                    "DELIVERING": "배송중",
-                    "FINAL_DELIVERY": "배송완료",
-                    "NONE_TRACKING": "추적불가",
-                }
-                _ord_list["상태"] = _ord_list["상태"].map(lambda x: _status_map.get(x, x))
+                _inst_by_box = pd.DataFrame()
 
-                # 금액 포맷
-                if "결제금액" in _ord_list.columns:
-                    _ord_list["결제금액"] = _ord_list["결제금액"].apply(lambda x: f"{int(x):,}" if pd.notna(x) else "0")
+            _inst_total = len(_inst_by_box)
+            _inst_amount = int(_inst_by_box["결제금액"].sum()) if not _inst_by_box.empty else 0
 
-                gb = GridOptionsBuilder.from_dataframe(_ord_list)
+            _ik1, _ik2 = st.columns(2)
+            _ik1.metric("상품준비중 주문", f"{_inst_total:,}건")
+            _ik2.metric("총 금액", f"₩{_ord_fmt_krw(_inst_amount)}")
+
+            if _inst_by_box.empty:
+                st.info("상품준비중(INSTRUCT) 상태의 주문이 없습니다.")
+            else:
+                _inst_display = _inst_by_box[["계정", "묶음배송번호", "주문번호", "상품명", "수량", "결제금액", "주문일", "수취인"]].copy()
+                _inst_display["결제금액"] = _inst_display["결제금액"].apply(lambda x: f"{int(x):,}" if pd.notna(x) else "0")
+
+                gb = GridOptionsBuilder.from_dataframe(_inst_display)
                 gb.configure_pagination(paginationAutoPageSize=False, paginationPageSize=20)
                 gb.configure_default_column(resizable=True, sorteable=True, filterable=True)
-                gb.configure_column("상품명", width=250)
-                gb.configure_column("옵션명", width=200)
+                gb.configure_column("상품명", width=350)
                 grid_opts = gb.build()
-                AgGrid(_ord_list, gridOptions=grid_opts, height=500, theme="streamlit")
+                AgGrid(_inst_display, gridOptions=grid_opts, height=400, theme="streamlit", key="instruct_grid")
 
-                # CSV 다운로드
+            st.divider()
+
+            # ── 섹션 2: 거래처별 발주서 ──
+            st.subheader("거래처별 발주서")
+
+            _dc1, _dc2 = st.columns([3, 1])
+            with _dc1:
+                _dist_split_set = st.checkbox("세트 상품 개별 분리", value=True, key="dist_split_set",
+                                              help="'완자+기출픽 세트' 같은 묶음을 개별 도서로 나눕니다")
+            with _dc2:
+                pass
+
+            # INSTRUCT + DEPARTURE 합산 (API 실시간)
+            _departure_live = _fetch_live_orders("DEPARTURE")
+            _departure_all = _departure_live[~_departure_live["취소"]].copy() if not _departure_live.empty else pd.DataFrame()
+            _dist_frames = [df for df in [_instruct_all, _departure_all] if not df.empty]
+            _dist_orders = pd.concat(_dist_frames, ignore_index=True) if _dist_frames else pd.DataFrame()
+
+            if _dist_orders.empty:
+                st.info("발주서 대상 주문이 없습니다.")
+            else:
+                # 출판사 매칭
+                _pub_list = query_df("SELECT name FROM publishers WHERE is_active = 1 ORDER BY LENGTH(name) DESC")
+                _pub_names = _pub_list["name"].tolist() if not _pub_list.empty else []
+
+                def _match_pub(row):
+                    result = match_publisher_from_text(str(row.get("옵션명") or ""), _pub_names)
+                    if not result:
+                        result = match_publisher_from_text(str(row.get("상품명") or ""), _pub_names)
+                    return result
+
+                # 세트 분리 처리 (옵션명 첫 콤마 구간 기반)
+                if _dist_split_set:
+                    _expanded_rows = []
+                    for _, row in _dist_orders.iterrows():
+                        # 옵션명 첫 콤마 구간 = 실제 도서명
+                        _opt_raw = str(row["옵션명"] or row["상품명"] or "")
+                        _opt_title = _opt_raw.split(",")[0].strip()
+                        parts = _split_set_name(_opt_title)
+                        if len(parts) >= 2:
+                            price_each = int(row["결제금액"]) // len(parts) if pd.notna(row["결제금액"]) else 0
+                            for pi, part in enumerate(parts):
+                                new_row = row.copy()
+                                new_row["도서명"] = part.strip()
+                                new_row["결제금액"] = price_each if pi < len(parts) - 1 else int(row["결제금액"] or 0) - price_each * (len(parts) - 1)
+                                new_row["원주문"] = _opt_title
+                                _expanded_rows.append(new_row)
+                        else:
+                            row_copy = row.copy()
+                            row_copy["도서명"] = _opt_title
+                            row_copy["원주문"] = ""
+                            _expanded_rows.append(row_copy)
+                    _dist_df = pd.DataFrame(_expanded_rows)
+                else:
+                    _dist_orders["도서명"] = _dist_orders["옵션명"].apply(lambda x: str(x).split(",")[0].strip())
+                    _dist_orders["원주문"] = ""
+                    _dist_df = _dist_orders
+
+                _dist_df["출판사"] = _dist_df.apply(_match_pub, axis=1)
+                _dist_df["거래처"] = _dist_df["출판사"].apply(resolve_distributor)
+
+                # 거래처별 요약
+                _dist_summary = _dist_df.groupby("거래처").agg(
+                    건수=("도서명", "count"),
+                    수량합계=("수량", "sum"),
+                    금액합계=("결제금액", "sum"),
+                ).reset_index().sort_values("건수", ascending=False)
+                _dist_summary["금액합계"] = _dist_summary["금액합계"].apply(lambda x: f"{int(x):,}")
+
+                st.dataframe(_dist_summary, hide_index=True, width="stretch")
+
+                # Excel 다운로드
+                _dist_df["도서명_clean"] = _dist_df["도서명"].apply(_clean_book_name)
+                _agg = _dist_df.groupby(["거래처", "출판사", "도서명_clean"]).agg(
+                    주문수량=("수량", "sum"),
+                ).reset_index().rename(columns={"도서명_clean": "도서명"})
+                _agg = _agg.sort_values(["거래처", "출판사", "도서명"])
+
+                _dist_names_sorted = _dist_summary["거래처"].tolist()
+
+                _xl_buf = _io.BytesIO()
+                with pd.ExcelWriter(_xl_buf, engine="openpyxl") as writer:
+                    from openpyxl.styles import Font as _Font, PatternFill as _PF, Alignment as _AL, Border as _Bdr, Side as _Sd
+
+                    _hf = _PF(start_color="4472C4", end_color="4472C4", fill_type="solid")
+                    _sf = _PF(start_color="D9E2F3", end_color="D9E2F3", fill_type="solid")
+                    _bdr = _Bdr(left=_Sd(style='thin'), right=_Sd(style='thin'),
+                                top=_Sd(style='thin'), bottom=_Sd(style='thin'))
+
+                    # 전체 목록 시트
+                    _raw_agg = _dist_df.groupby("옵션명").agg(수량=("수량", "sum")).reset_index().sort_values("옵션명")
+                    _raw_agg.to_excel(writer, sheet_name="전체", index=False, startrow=1)
+                    _ws0 = writer.sheets["전체"]
+                    _ws0.merge_cells(start_row=1, start_column=1, end_row=1, end_column=2)
+                    _ws0.cell(row=1, column=1).value = f"전체 주문 목록 ({_ord_date_from_str} ~ {_ord_date_to_str})"
+                    _ws0.cell(row=1, column=1).font = _Font(bold=True, size=13)
+                    for ci in range(1, 3):
+                        c = _ws0.cell(row=2, column=ci)
+                        c.fill = _hf
+                        c.font = _Font(bold=True, color="FFFFFF")
+                    _ws0.column_dimensions["A"].width = 70
+                    _ws0.column_dimensions["B"].width = 8
+
+                    # 요약 시트
+                    _agg_summary = _agg.groupby("거래처").agg(
+                        품목수=("도서명", "count"), 총수량=("주문수량", "sum")
+                    ).reset_index().sort_values("총수량", ascending=False)
+                    _agg_summary.to_excel(writer, sheet_name="요약", index=False, startrow=1)
+                    _ws1 = writer.sheets["요약"]
+                    _ws1.merge_cells(start_row=1, start_column=1, end_row=1, end_column=3)
+                    _ws1.cell(row=1, column=1).value = f"거래처별 요약 ({_ord_date_from_str} ~ {_ord_date_to_str})"
+                    _ws1.cell(row=1, column=1).font = _Font(bold=True, size=13)
+                    for ci in range(1, 4):
+                        c = _ws1.cell(row=2, column=ci)
+                        c.fill = _hf
+                        c.font = _Font(bold=True, color="FFFFFF")
+
+                    # 거래처별 시트
+                    _dist_order = ["제일", "대성", "일신", "서부", "북전", "동아", "강우사", "대원", "일반"]
+                    _all_dists = sorted(_agg["거래처"].unique(),
+                                        key=lambda d: _dist_order.index(d) if d in _dist_order else 99)
+                    for _dname in _all_dists:
+                        _sdf = _agg[_agg["거래처"] == _dname][["도서명", "출판사", "주문수량"]].copy()
+                        if _sdf.empty:
+                            continue
+                        _sdf = _sdf.sort_values(["출판사", "도서명"])
+                        _safe = _dname[:31].replace("/", "_").replace("\\", "_")
+                        _sdf.to_excel(writer, sheet_name=_safe, index=False, startrow=1)
+                        ws = writer.sheets[_safe]
+                        ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=3)
+                        ws.cell(row=1, column=1).value = f"[{_dname}] 발주서 ({_ord_date_from_str} ~ {_ord_date_to_str})"
+                        ws.cell(row=1, column=1).font = _Font(bold=True, size=13)
+                        ws.cell(row=1, column=1).alignment = _AL(horizontal="center")
+                        for ci in range(1, 4):
+                            c = ws.cell(row=2, column=ci)
+                            c.fill = _hf
+                            c.font = _Font(bold=True, color="FFFFFF")
+                            c.border = _bdr
+                        for ri in range(3, 3 + len(_sdf)):
+                            for ci in range(1, 4):
+                                ws.cell(row=ri, column=ci).border = _bdr
+                            ws.cell(row=ri, column=3).alignment = _AL(horizontal="center")
+                        _sr = 3 + len(_sdf)
+                        ws.cell(row=_sr, column=1, value="합계").font = _Font(bold=True)
+                        ws.cell(row=_sr, column=1).fill = _sf
+                        ws.cell(row=_sr, column=3, value=int(_sdf["주문수량"].sum())).font = _Font(bold=True)
+                        ws.cell(row=_sr, column=3).fill = _sf
+                        for ci in range(1, 4):
+                            ws.cell(row=_sr, column=ci).border = _bdr
+                        ws.column_dimensions["A"].width = 45
+                        ws.column_dimensions["B"].width = 14
+                        ws.column_dimensions["C"].width = 10
+
+                _xl_buf.seek(0)
+
                 st.download_button(
-                    "CSV 다운로드",
-                    _ord_list.to_csv(index=False, encoding="utf-8-sig"),
-                    file_name=f"orders_{_ord_date_from_str}_{_ord_date_to_str}.csv",
-                    mime="text/csv",
-                    key="ord_csv_dl",
+                    "발주서 Excel 다운로드 (거래처별 시트)",
+                    _xl_buf.getvalue(),
+                    file_name=f"주문{_ord_date_to_str[5:7]}{_ord_date_to_str[8:10]}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="dist_xlsx_dl",
+                    type="primary",
+                    use_container_width=True,
                 )
 
-        # ── 탭2: 상태별 분석 ──
-        with _ord_tab2:
-            _ord_by_status = query_df(f"""
-                SELECT o.status as 상태,
-                       COUNT(*) as 건수,
-                       COALESCE(SUM(o.order_price), 0) as 매출액
-                FROM orders o
-                WHERE 1=1 {_ord_acct_where} {_ord_date_where}
-                GROUP BY o.status
-                ORDER BY 건수 DESC
-            """, _ord_acct_params)
+                # 도서별 합산 목록
+                st.subheader("도서별 주문 합산")
+                _dist_filter = st.multiselect(
+                    "거래처 필터", _dist_names_sorted,
+                    default=_dist_names_sorted, key="dist_filter",
+                )
+                _filtered_agg = _agg[_agg["거래처"].isin(_dist_filter)] if _dist_filter else _agg
+                _show_agg = _filtered_agg[["거래처", "출판사", "도서명", "주문수량"]].copy()
 
-            if not _ord_by_status.empty:
-                import plotly.express as px
+                gb = GridOptionsBuilder.from_dataframe(_show_agg)
+                gb.configure_pagination(paginationAutoPageSize=False, paginationPageSize=20)
+                gb.configure_default_column(resizable=True, sorteable=True, filterable=True)
+                gb.configure_column("도서명", width=350)
+                gb.configure_column("주문수량", width=80)
+                grid_opts = gb.build()
+                AgGrid(_show_agg, gridOptions=grid_opts, height=500, theme="streamlit", key="dist_grid")
 
-                _s_col1, _s_col2 = st.columns(2)
+            st.divider()
 
-                with _s_col1:
-                    _status_map2 = {
-                        "ACCEPT": "결제완료", "INSTRUCT": "상품준비중", "DEPARTURE": "출고완료",
-                        "DELIVERING": "배송중", "FINAL_DELIVERY": "배송완료", "NONE_TRACKING": "추적불가",
-                    }
-                    _pie_df = _ord_by_status.copy()
-                    _pie_df["상태명"] = _pie_df["상태"].map(lambda x: _status_map2.get(x, x))
-                    _fig_pie = px.pie(_pie_df, values="건수", names="상태명", title="상태별 주문 비율")
-                    _fig_pie.update_layout(height=350, margin=dict(l=20, r=20, t=40, b=20))
-                    st.plotly_chart(_fig_pie, use_container_width=True)
+            # ── 섹션 3: 송장 업로드 ──
+            st.subheader("송장 업로드")
+            st.caption("계정을 선택하여 상품준비중(INSTRUCT) 주문에 운송장을 등록합니다.")
 
-                with _s_col2:
-                    _bar_df = _ord_by_status.copy()
-                    _bar_df["상태명"] = _bar_df["상태"].map(lambda x: _status_map2.get(x, x))
-                    _fig_bar = px.bar(_bar_df, x="상태명", y="매출액", title="상태별 매출 비교",
-                                      color="상태명")
-                    _fig_bar.update_layout(height=350, margin=dict(l=20, r=20, t=40, b=20), showlegend=False)
-                    st.plotly_chart(_fig_bar, use_container_width=True)
+            _inv_acct = st.selectbox("계정 선택", account_names, key="inv_acct_select")
+            _inv_acct_row = None
+            if _inv_acct and not accounts_df.empty:
+                _mask = accounts_df["account_name"] == _inv_acct
+                if _mask.any():
+                    _inv_acct_row = accounts_df[_mask].iloc[0]
 
-                # 배송 소요시간 (주문→배송완료)
-                _ord_delivery_time = query_df(f"""
-                    SELECT
-                        ROUND(AVG(JULIANDAY(o.delivered_date) - JULIANDAY(o.ordered_at)), 1) as 평균소요일,
-                        ROUND(MIN(JULIANDAY(o.delivered_date) - JULIANDAY(o.ordered_at)), 1) as 최소소요일,
-                        ROUND(MAX(JULIANDAY(o.delivered_date) - JULIANDAY(o.ordered_at)), 1) as 최대소요일,
-                        COUNT(*) as 건수
-                    FROM orders o
-                    WHERE o.status = 'FINAL_DELIVERY'
-                          AND o.delivered_date IS NOT NULL
-                          AND o.ordered_at IS NOT NULL
-                          {_ord_acct_where} {_ord_date_where}
-                """, _ord_acct_params)
+            if _inv_acct_row is not None:
+                _inv_account_id = int(_inv_acct_row["id"])
+                _inv_client = create_wing_client(_inv_acct_row)
 
-                if not _ord_delivery_time.empty and _ord_delivery_time.iloc[0]["건수"] > 0:
-                    st.subheader("배송 소요시간")
-                    _dt_row = _ord_delivery_time.iloc[0]
-                    _dt1, _dt2, _dt3, _dt4 = st.columns(4)
-                    _dt1.metric("평균", f"{_dt_row['평균소요일']}일")
-                    _dt2.metric("최소", f"{_dt_row['최소소요일']}일")
-                    _dt3.metric("최대", f"{_dt_row['최대소요일']}일")
-                    _dt4.metric("완료건수", f"{int(_dt_row['건수']):,}건")
-            else:
-                st.info("분석할 주문 데이터가 없습니다.")
-
-        # ── 탭3: 배송 관리 ──
-        with _ord_tab3:
-            if selected_account is None:
-                st.warning("사이드바에서 계정을 선택하세요.")
-            else:
-                _mgmt_account_id = int(selected_account["id"])
-                _mgmt_client = create_wing_client(selected_account)
-
-                st.subheader("상품준비중 일괄 처리")
-                st.caption("ACCEPT(결제완료) 상태의 주문을 INSTRUCT(상품준비중)으로 변경합니다.")
-
-                _accept_orders = query_df(f"""
-                    SELECT o.shipment_box_id as 묶음배송번호,
-                           o.order_id as 주문번호,
-                           o.seller_product_name as 상품명,
-                           o.shipping_count as 수량,
-                           o.order_price as 결제금액,
-                           DATE(o.ordered_at) as 주문일
-                    FROM orders o
-                    WHERE o.account_id = :aid AND o.status = 'ACCEPT'
-                    ORDER BY o.ordered_at
-                """, {"aid": _mgmt_account_id})
-
-                if _accept_orders.empty:
-                    st.info("상품준비중 처리할 주문이 없습니다.")
-                else:
-                    st.dataframe(_accept_orders, width="stretch", hide_index=True)
-                    if st.button("전체 상품준비중 처리", type="primary", key="btn_ack_all"):
-                        _ack_ids = _accept_orders["묶음배송번호"].unique().tolist()
-                        if _mgmt_client:
-                            try:
-                                _ack_result = _mgmt_client.acknowledge_ordersheets([int(x) for x in _ack_ids])
-                                st.success(f"상품준비중 처리 완료: {len(_ack_ids)}건")
-                                # DB 상태 업데이트
-                                with engine.connect() as conn:
-                                    for _sid in _ack_ids:
-                                        conn.execute(text(
-                                            "UPDATE orders SET status = 'INSTRUCT', updated_at = :now WHERE account_id = :aid AND shipment_box_id = :sid"
-                                        ), {"now": datetime.utcnow().isoformat(), "aid": _mgmt_account_id, "sid": int(_sid)})
-                                    conn.commit()
-                                st.cache_data.clear()
-                            except CoupangWingError as e:
-                                st.error(f"API 오류: {e}")
-                        else:
-                            st.error("WING API 클라이언트를 생성할 수 없습니다.")
-
-                st.divider()
-
-                # ── 송장 업로드 ──
-                st.subheader("송장 업로드")
-                st.caption("INSTRUCT(상품준비중) 상태의 주문에 운송장을 등록합니다.")
-
-                _instruct_orders = query_df(f"""
-                    SELECT o.shipment_box_id as 묶음배송번호,
-                           o.order_id as 주문번호,
-                           o.vendor_item_id as 옵션ID,
-                           o.seller_product_name as 상품명,
-                           o.shipping_count as 수량,
-                           DATE(o.ordered_at) as 주문일
-                    FROM orders o
-                    WHERE o.account_id = :aid AND o.status = 'INSTRUCT'
-                    ORDER BY o.ordered_at
-                """, {"aid": _mgmt_account_id})
+                # API 실시간 데이터에서 계정 필터
+                _instruct_orders = pd.DataFrame()
+                if not _instruct_all.empty:
+                    _inv_filtered = _instruct_all[_instruct_all["_account_id"] == _inv_account_id].copy()
+                    if not _inv_filtered.empty:
+                        _instruct_orders = _inv_filtered.rename(columns={"_vendor_item_id": "옵션ID"})[
+                            ["묶음배송번호", "주문번호", "옵션ID", "상품명", "수량", "주문일"]
+                        ].copy()
 
                 if _instruct_orders.empty:
-                    st.info("송장 등록할 주문이 없습니다.")
+                    st.info(f"[{_inv_acct}] 송장 등록할 주문이 없습니다.")
                 else:
                     st.dataframe(_instruct_orders, width="stretch", hide_index=True)
 
@@ -3874,10 +4221,11 @@ elif page == "주문":
                     with _inv_col2:
                         _inv_number = st.text_input("운송장번호", key="inv_number")
 
-                    if st.button("송장 등록", key="btn_upload_inv"):
+                    _inv_count = _instruct_orders["묶음배송번호"].nunique()
+                    if st.button(f"송장 등록 ({_inv_count}건)", key="btn_upload_inv"):
                         if not _inv_number:
                             st.warning("운송장번호를 입력하세요.")
-                        elif _mgmt_client:
+                        elif _inv_client:
                             try:
                                 _inv_data = []
                                 for _, row in _instruct_orders.iterrows():
@@ -3887,55 +4235,230 @@ elif page == "주문":
                                         "vendorItemId": int(row["옵션ID"]) if pd.notna(row["옵션ID"]) else 0,
                                         "deliveryCompanyCode": _sel_company,
                                         "invoiceNumber": _inv_number,
+                                        "splitShipping": False,
+                                        "preSplitShipped": False,
+                                        "estimatedShippingDate": "",
                                     })
-                                _inv_result = _mgmt_client.upload_invoice(_inv_data)
-                                st.success(f"송장 등록 완료: {len(_inv_data)}건")
-                                # DB 상태 업데이트
-                                with engine.connect() as conn:
-                                    for _inv in _inv_data:
-                                        conn.execute(text("""
-                                            UPDATE orders SET status = 'DEPARTURE',
-                                                   delivery_company_name = :comp,
-                                                   invoice_number = :inv,
-                                                   updated_at = :now
-                                            WHERE account_id = :aid AND shipment_box_id = :sid
-                                        """), {
-                                            "comp": _delivery_companies[_sel_company],
-                                            "inv": _inv_number,
-                                            "now": datetime.utcnow().isoformat(),
-                                            "aid": _mgmt_account_id,
-                                            "sid": _inv["shipmentBoxId"],
-                                        })
-                                    conn.commit()
-                                st.cache_data.clear()
+                                _inv_result = _inv_client.upload_invoice(_inv_data)
+
+                                _inv_success_ids = []
+                                _inv_fail_items = []
+                                if isinstance(_inv_result, dict) and "data" in _inv_result:
+                                    _inv_resp = _inv_result["data"]
+                                    _inv_resp_code = _inv_resp.get("responseCode")
+                                    _inv_resp_list = _inv_resp.get("responseList", [])
+
+                                    for _ri in _inv_resp_list:
+                                        if _ri.get("succeed"):
+                                            _inv_success_ids.append(_ri["shipmentBoxId"])
+                                        else:
+                                            _inv_fail_items.append(_ri)
+
+                                    if _inv_resp_code == 0:
+                                        st.success(f"송장 등록 완료: {len(_inv_success_ids)}건")
+                                    elif _inv_resp_code == 1:
+                                        st.warning(f"부분 성공: {len(_inv_success_ids)}건 성공, {len(_inv_fail_items)}건 실패")
+                                        for _fi in _inv_fail_items:
+                                            st.error(f"  {_fi.get('shipmentBoxId')}: [{_fi.get('resultCode')}] {_fi.get('resultMessage', '')}")
+                                    elif _inv_resp_code == 99:
+                                        st.error(f"전체 실패: {_inv_resp.get('responseMessage', '')}")
+                                        for _fi in _inv_fail_items:
+                                            st.error(f"  {_fi.get('shipmentBoxId')}: [{_fi.get('resultCode')}] {_fi.get('resultMessage', '')}")
+                                    else:
+                                        _inv_success_ids = [d["shipmentBoxId"] for d in _inv_data]
+                                        st.success(f"송장 등록 완료: {len(_inv_success_ids)}건")
+                                else:
+                                    _inv_success_ids = [d["shipmentBoxId"] for d in _inv_data]
+                                    st.success(f"송장 등록 완료: {len(_inv_success_ids)}건")
+
+                                if _inv_success_ids:
+                                    # 캐시 무효화 → 다음 로드에서 API 재조회
+                                    for _k in list(st.session_state.keys()):
+                                        if _k.startswith("_live_"):
+                                            del st.session_state[_k]
+                                    st.rerun()
                             except CoupangWingError as e:
                                 st.error(f"API 오류: {e}")
                         else:
                             st.error("WING API 클라이언트를 생성할 수 없습니다.")
 
-                st.divider()
+    # ══════════════════════════════════════
+    # 탭3: 종합
+    # ══════════════════════════════════════
+    with _ord_tab3:
+            st.caption("WING API 실시간 조회 — 결제완료 + 상품준비중")
 
-                # ── 주문 취소 ──
-                st.subheader("주문 취소")
-                st.caption("ACCEPT/INSTRUCT 상태의 주문을 취소 요청합니다.")
+            # ── 종합 탭 필터 ──
+            _comp_ctrl1, _comp_ctrl2 = st.columns([2, 2])
+            with _comp_ctrl1:
+                _comp_acct = st.selectbox("계정", ["전체"] + account_names, key="comp_acct")
+            with _comp_ctrl2:
+                _comp_status = st.selectbox("상태", ["전체", "ACCEPT", "INSTRUCT"], key="comp_status")
 
-                _cancelable = query_df(f"""
-                    SELECT o.order_id as 주문번호,
-                           o.vendor_item_id as 옵션ID,
-                           o.seller_product_name as 상품명,
-                           o.shipping_count as 수량,
-                           o.order_price as 결제금액,
-                           o.status as 상태,
-                           DATE(o.ordered_at) as 주문일
-                    FROM orders o
-                    WHERE o.account_id = :aid AND o.status IN ('ACCEPT', 'INSTRUCT')
-                    ORDER BY o.ordered_at
-                """, {"aid": _mgmt_account_id})
+            # API 실시간 데이터 로드
+            with st.spinner("전체 주문 조회 중..."):
+                _all_live = _fetch_all_live_orders()
+
+            # Python 필터링 (계정 + 기간)
+            _comp_filtered = _all_live.copy() if not _all_live.empty else pd.DataFrame()
+            if not _comp_filtered.empty:
+                _comp_filtered = _filter_orders_by_date(_comp_filtered, _ord_date_from_str, _ord_date_to_str)
+                if _comp_acct != "전체":
+                    _comp_filtered = _comp_filtered[_comp_filtered["계정"] == _comp_acct]
+
+            # ── KPI 카드 ──
+            _comp_total = len(_comp_filtered)
+            _comp_sales = int(_comp_filtered["_order_price_raw"].sum()) if not _comp_filtered.empty else 0
+            _comp_accept = len(_comp_filtered[_comp_filtered["상태"] == "ACCEPT"]) if not _comp_filtered.empty else 0
+            _comp_instruct = len(_comp_filtered[_comp_filtered["상태"] == "INSTRUCT"]) if not _comp_filtered.empty else 0
+
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("총 주문 수", f"{_comp_total:,}건")
+            k2.metric("총 매출액", f"₩{_ord_fmt_krw(_comp_sales)}")
+            k3.metric("결제완료", f"{_comp_accept:,}건")
+            k4.metric("상품준비중", f"{_comp_instruct:,}건")
+
+            # 일별 추이
+            if not _comp_filtered.empty:
+                _comp_daily = _comp_filtered.groupby("주문일").agg(
+                    주문수=("주문번호", "count"),
+                    매출액=("_order_price_raw", "sum"),
+                ).reset_index().rename(columns={"주문일": "날짜"}).sort_values("날짜")
+            else:
+                _comp_daily = pd.DataFrame()
+
+            if not _comp_daily.empty:
+                import plotly.graph_objects as go
+                from plotly.subplots import make_subplots
+
+                _comp_fig = make_subplots(specs=[[{"secondary_y": True}]])
+                _comp_fig.add_trace(
+                    go.Bar(x=_comp_daily["날짜"], y=_comp_daily["주문수"], name="주문 수", marker_color="#636EFA"),
+                    secondary_y=False,
+                )
+                _comp_fig.add_trace(
+                    go.Scatter(x=_comp_daily["날짜"], y=_comp_daily["매출액"], name="매출액", line=dict(color="#EF553B", width=2)),
+                    secondary_y=True,
+                )
+                _comp_fig.update_layout(
+                    title="일별 주문 추이",
+                    height=350,
+                    margin=dict(l=20, r=20, t=40, b=20),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                )
+                _comp_fig.update_yaxes(title_text="주문 수", secondary_y=False)
+                _comp_fig.update_yaxes(title_text="매출액 (원)", secondary_y=True)
+                st.plotly_chart(_comp_fig, use_container_width=True)
+
+            st.divider()
+
+            # ── 서브 섹션 A: 전체 주문 목록 ──
+            st.subheader("전체 주문 목록")
+
+            # 상태 필터 추가 적용
+            _ord_list = _comp_filtered.copy() if not _comp_filtered.empty else pd.DataFrame()
+            if not _ord_list.empty and _comp_status != "전체":
+                _ord_list = _ord_list[_ord_list["상태"] == _comp_status]
+
+            if _ord_list.empty:
+                st.info("해당 조건의 주문이 없습니다.")
+            else:
+                _ord_display = _ord_list[["계정", "주문번호", "묶음배송번호", "주문일", "상품명", "옵션명", "수량", "결제금액", "상태", "수취인"]].copy()
+                _ord_display["상태"] = _ord_display["상태"].map(lambda x: _status_map.get(x, x))
+                _ord_display["결제금액"] = _ord_display["결제금액"].apply(lambda x: f"{int(x):,}" if pd.notna(x) else "0")
+
+                gb = GridOptionsBuilder.from_dataframe(_ord_display)
+                gb.configure_pagination(paginationAutoPageSize=False, paginationPageSize=20)
+                gb.configure_default_column(resizable=True, sorteable=True, filterable=True)
+                gb.configure_column("상품명", width=250)
+                gb.configure_column("옵션명", width=200)
+                grid_opts = gb.build()
+                AgGrid(_ord_display, gridOptions=grid_opts, height=500, theme="streamlit", key="comp_order_grid")
+
+                st.download_button(
+                    "CSV 다운로드",
+                    _ord_display.to_csv(index=False, encoding="utf-8-sig"),
+                    file_name=f"orders_{_ord_date_from_str}_{_ord_date_to_str}.csv",
+                    mime="text/csv",
+                    key="ord_csv_dl",
+                )
+
+            st.divider()
+
+            # ── 서브 섹션 B: 상태별 분석 ──
+            st.subheader("상태별 분석")
+
+            if not _comp_filtered.empty:
+                _ord_by_status = _comp_filtered.groupby("상태").agg(
+                    건수=("주문번호", "count"),
+                    매출액=("_order_price_raw", "sum"),
+                ).reset_index().sort_values("건수", ascending=False)
+            else:
+                _ord_by_status = pd.DataFrame()
+
+            if not _ord_by_status.empty:
+                import plotly.express as px
+
+                _s_col1, _s_col2 = st.columns(2)
+
+                with _s_col1:
+                    _pie_df = _ord_by_status.copy()
+                    _pie_df["상태명"] = _pie_df["상태"].map(lambda x: _status_map.get(x, x))
+                    _fig_pie = px.pie(_pie_df, values="건수", names="상태명", title="상태별 주문 비율")
+                    _fig_pie.update_layout(height=350, margin=dict(l=20, r=20, t=40, b=20))
+                    st.plotly_chart(_fig_pie, use_container_width=True)
+
+                with _s_col2:
+                    _bar_df = _ord_by_status.copy()
+                    _bar_df["상태명"] = _bar_df["상태"].map(lambda x: _status_map.get(x, x))
+                    _fig_bar = px.bar(_bar_df, x="상태명", y="매출액", title="상태별 매출 비교",
+                                      color="상태명")
+                    _fig_bar.update_layout(height=350, margin=dict(l=20, r=20, t=40, b=20), showlegend=False)
+                    st.plotly_chart(_fig_bar, use_container_width=True)
+
+            else:
+                st.info("분석할 주문 데이터가 없습니다.")
+
+            st.divider()
+
+            # ── 서브 섹션 C: 주문 취소 ──
+            st.subheader("주문 취소")
+            st.caption("ACCEPT/INSTRUCT 상태의 주문을 취소 요청합니다.")
+
+            _cancel_acct = st.selectbox("계정 선택", account_names, key="cancel_acct_select")
+            _cancel_acct_row = None
+            if _cancel_acct and not accounts_df.empty:
+                _mask = accounts_df["account_name"] == _cancel_acct
+                if _mask.any():
+                    _cancel_acct_row = accounts_df[_mask].iloc[0]
+
+            if _cancel_acct_row is not None:
+                _cancel_account_id = int(_cancel_acct_row["id"])
+                _cancel_client = create_wing_client(_cancel_acct_row)
+
+                # ACCEPT + INSTRUCT API 데이터에서 계정 필터
+                _cancel_frames = []
+                for _cs in ["ACCEPT", "INSTRUCT"]:
+                    _csdf = _fetch_live_orders(_cs)
+                    if not _csdf.empty:
+                        _cancel_frames.append(_csdf)
+                _cancel_all = pd.concat(_cancel_frames, ignore_index=True) if _cancel_frames else pd.DataFrame()
+                _cancelable = pd.DataFrame()
+                if not _cancel_all.empty:
+                    _cancel_acct_df = _cancel_all[
+                        (_cancel_all["_account_id"] == _cancel_account_id) & (~_cancel_all["취소"])
+                    ].copy()
+                    if not _cancel_acct_df.empty:
+                        _cancelable = _cancel_acct_df.rename(columns={"_vendor_item_id": "옵션ID"})[
+                            ["주문번호", "옵션ID", "상품명", "수량", "결제금액", "상태", "주문일"]
+                        ].copy()
 
                 if _cancelable.empty:
-                    st.info("취소 가능한 주문이 없습니다.")
+                    st.info(f"[{_cancel_acct}] 취소 가능한 주문이 없습니다.")
                 else:
-                    st.dataframe(_cancelable, width="stretch", hide_index=True)
+                    _cancelable_display = _cancelable.copy()
+                    _cancelable_display["상태"] = _cancelable_display["상태"].map(lambda x: _status_map.get(x, x))
+                    st.dataframe(_cancelable_display, width="stretch", hide_index=True)
 
                     _cancel_reasons = {
                         "SOLD_OUT": "재고 소진",
@@ -3950,16 +4473,15 @@ elif page == "주문":
 
                     st.warning("주문 취소는 되돌릴 수 없습니다. 신중하게 처리하세요.")
                     if st.button("선택 주문 전체 취소", type="secondary", key="btn_cancel_ord"):
-                        if _mgmt_client:
+                        if _cancel_client:
                             try:
-                                # 주문번호별로 그룹핑하여 취소
                                 _cancel_groups = _cancelable.groupby("주문번호")
                                 _cancel_count = 0
                                 for _oid, _group in _cancel_groups:
                                     _vids = [int(x) for x in _group["옵션ID"].tolist() if pd.notna(x)]
                                     _cnts = [int(x) for x in _group["수량"].tolist()]
                                     if _vids:
-                                        _mgmt_client.cancel_order(
+                                        _cancel_client.cancel_order(
                                             order_id=int(_oid),
                                             vendor_item_ids=_vids,
                                             receipt_counts=_cnts,
@@ -3968,19 +4490,11 @@ elif page == "주문":
                                         )
                                         _cancel_count += len(_vids)
                                 st.success(f"취소 요청 완료: {_cancel_count}건")
-                                # DB 업데이트
-                                with engine.connect() as conn:
-                                    for _, _cr in _cancelable.iterrows():
-                                        conn.execute(text(
-                                            "UPDATE orders SET canceled = 1, updated_at = :now WHERE account_id = :aid AND order_id = :oid AND vendor_item_id = :vid"
-                                        ), {
-                                            "now": datetime.utcnow().isoformat(),
-                                            "aid": _mgmt_account_id,
-                                            "oid": int(_cr["주문번호"]),
-                                            "vid": int(_cr["옵션ID"]) if pd.notna(_cr["옵션ID"]) else 0,
-                                        })
-                                    conn.commit()
-                                st.cache_data.clear()
+                                # 캐시 무효화 → 다음 로드에서 API 재조회
+                                for _k in list(st.session_state.keys()):
+                                    if _k.startswith("_live_"):
+                                        del st.session_state[_k]
+                                st.rerun()
                             except CoupangWingError as e:
                                 st.error(f"API 오류: {e}")
                         else:
@@ -4056,8 +4570,7 @@ elif page == "반품":
     # ── 테이블 존재 확인 ──
     _ret_table_exists = False
     try:
-        _ret_check = query_df("SELECT name FROM sqlite_master WHERE type='table' AND name='return_requests'")
-        _ret_table_exists = not _ret_check.empty
+        _ret_table_exists = sa_inspect(engine).has_table("return_requests")
     except Exception:
         pass
 
@@ -4448,43 +4961,44 @@ elif page == "반품":
 elif page == "노출 전략":
     st.title("노출 전략")
 
-    # ── ad_performances 테이블 보장 ──
-    with engine.connect() as _conn:
-        _conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS ad_performances (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                account_id INTEGER NOT NULL REFERENCES accounts(id),
-                ad_date DATE NOT NULL,
-                campaign_id VARCHAR(50) DEFAULT '',
-                campaign_name VARCHAR(200) DEFAULT '',
-                ad_group_name VARCHAR(200) DEFAULT '',
-                coupang_product_id VARCHAR(50) DEFAULT '',
-                product_name VARCHAR(500) DEFAULT '',
-                listing_id INTEGER REFERENCES listings(id),
-                keyword VARCHAR(200) DEFAULT '',
-                match_type VARCHAR(20) DEFAULT '',
-                impressions INTEGER DEFAULT 0,
-                clicks INTEGER DEFAULT 0,
-                ctr REAL DEFAULT 0.0,
-                avg_cpc INTEGER DEFAULT 0,
-                ad_spend INTEGER DEFAULT 0,
-                direct_orders INTEGER DEFAULT 0,
-                direct_revenue INTEGER DEFAULT 0,
-                indirect_orders INTEGER DEFAULT 0,
-                indirect_revenue INTEGER DEFAULT 0,
-                total_orders INTEGER DEFAULT 0,
-                total_revenue INTEGER DEFAULT 0,
-                roas REAL DEFAULT 0.0,
-                report_type VARCHAR(20) DEFAULT 'campaign',
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(account_id, ad_date, campaign_id, ad_group_name,
-                       coupang_product_id, keyword, report_type)
-            )
-        """))
-        _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_adperf_account_date ON ad_performances(account_id, ad_date)"))
-        _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_adperf_listing ON ad_performances(listing_id)"))
-        _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_adperf_product ON ad_performances(coupang_product_id)"))
-        _conn.commit()
+    # ── ad_performances 테이블 보장 (SQLite 전용 — Supabase에는 이미 존재) ──
+    if not _is_pg:
+        with engine.connect() as _conn:
+            _conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS ad_performances (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    account_id INTEGER NOT NULL REFERENCES accounts(id),
+                    ad_date DATE NOT NULL,
+                    campaign_id VARCHAR(50) DEFAULT '',
+                    campaign_name VARCHAR(200) DEFAULT '',
+                    ad_group_name VARCHAR(200) DEFAULT '',
+                    coupang_product_id VARCHAR(50) DEFAULT '',
+                    product_name VARCHAR(500) DEFAULT '',
+                    listing_id INTEGER REFERENCES listings(id),
+                    keyword VARCHAR(200) DEFAULT '',
+                    match_type VARCHAR(20) DEFAULT '',
+                    impressions INTEGER DEFAULT 0,
+                    clicks INTEGER DEFAULT 0,
+                    ctr REAL DEFAULT 0.0,
+                    avg_cpc INTEGER DEFAULT 0,
+                    ad_spend INTEGER DEFAULT 0,
+                    direct_orders INTEGER DEFAULT 0,
+                    direct_revenue INTEGER DEFAULT 0,
+                    indirect_orders INTEGER DEFAULT 0,
+                    indirect_revenue INTEGER DEFAULT 0,
+                    total_orders INTEGER DEFAULT 0,
+                    total_revenue INTEGER DEFAULT 0,
+                    roas REAL DEFAULT 0.0,
+                    report_type VARCHAR(20) DEFAULT 'campaign',
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(account_id, ad_date, campaign_id, ad_group_name,
+                           coupang_product_id, keyword, report_type)
+                )
+            """))
+            _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_adperf_account_date ON ad_performances(account_id, ad_date)"))
+            _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_adperf_listing ON ad_performances(listing_id)"))
+            _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_adperf_product ON ad_performances(coupang_product_id)"))
+            _conn.commit()
 
     from app.services.exposure_strategy import ExposureStrategyEngine
     _expo_engine = ExposureStrategyEngine(engine)

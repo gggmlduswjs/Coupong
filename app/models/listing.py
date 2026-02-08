@@ -56,6 +56,11 @@ class Listing(Base):
     free_ship_over_amount = Column(Integer)        # 무료배송 기준금액
     return_charge = Column(Integer)                # 반품 배송비
 
+    # 아이템 위너
+    winner_status = Column(String(20))             # 'winner', 'not_winner', None(미확인)
+    winner_checked_at = Column(DateTime)           # 마지막 위너 체크 시간
+    item_id = Column(String(50))                   # 쿠팡 아이템 ID (productId)
+
     # Raw data
     raw_json = Column(Text)                        # 상세 API 전체 응답 JSON
     detail_synced_at = Column(DateTime)            # 마지막 상세 동기화 시각
@@ -128,6 +133,11 @@ class Listing(Base):
     def is_low_stock(self):
         """재고가 부족한지"""
         return (self.stock_quantity or 0) <= LOW_STOCK_THRESHOLD
+
+    @property
+    def is_winner(self):
+        """아이템 위너인지"""
+        return self.winner_status == 'winner'
 
     @property
     def can_update(self):

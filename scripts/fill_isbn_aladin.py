@@ -8,10 +8,9 @@ os.chdir(os.path.join(os.path.dirname(__file__), '..'))
 from dotenv import load_dotenv
 load_dotenv()
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 from crawlers.aladin_api_crawler import AladinAPICrawler
-
-engine = create_engine('sqlite:///coupang_auto.db')
+from app.database import engine
 ttb_key = os.getenv("ALADIN_TTB_KEY", "")
 
 if not ttb_key:

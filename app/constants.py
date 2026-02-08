@@ -8,6 +8,7 @@ COUPANG_FEE_RATE = 0.11  # 판매가의 11%
 
 # 배송비
 DEFAULT_SHIPPING_COST = 2300  # 실제 택배비 (원)
+DEFAULT_RETURN_CHARGE = 2500  # 반품 배송비 (원)
 FREE_SHIPPING_THRESHOLD = 2000  # (레거시) 무료배송 순마진 기준 — 신규: determine_customer_shipping_fee() 사용
 TARGET_MARGIN_MIN = 1300  # 목표 최소 마진 (원)
 TARGET_MARGIN_MAX = 2000  # 목표 최대 마진 (원)
@@ -17,7 +18,7 @@ CONDITIONAL_FREE_THRESHOLD_70 = 30000  # 공급률 70% 조건부 무료배송 �
 CONDITIONAL_FREE_THRESHOLD_73 = 60000  # 공급률 73% 조건부 무료배송 기준 (원)
 
 # 재고
-DEFAULT_STOCK = 10  # 기본 재고 수량
+DEFAULT_STOCK = 1000  # 기본 재고 수량 (쿠팡 UI 기준)
 DEFAULT_LEAD_TIME = 2  # 출고 소요일
 LOW_STOCK_THRESHOLD = 3  # 재고 부족 기준 (이하면 리필)
 
@@ -41,10 +42,10 @@ BOOK_PRODUCT_DEFAULTS = {
     "deliveryChargeType": "CONDITIONAL_FREE",     # 조건부 무료배송 (20,000원 이상 무료)
     "deliveryCharge": DEFAULT_SHIPPING_COST,        # 미달 시 고객 부담 배송비 (= 실제 택배비)
     "freeShipOverAmount": CONDITIONAL_FREE_THRESHOLD,  # 조건부 무료배송 기준 금액 (20,000원)
-    "deliveryChargeOnReturn": DEFAULT_SHIPPING_COST,
+    "deliveryChargeOnReturn": DEFAULT_RETURN_CHARGE,
     "unionDeliveryType": "UNION_DELIVERY",
     "remoteAreaDeliverable": "N",
-    "returnCharge": DEFAULT_SHIPPING_COST,
+    "returnCharge": DEFAULT_RETURN_CHARGE,
     "requested": True,                           # 자동 판매승인 요청
     "adultOnly": "EVERYONE",
     "taxType": "FREE",                           # 도서 비과세
@@ -179,6 +180,99 @@ def determine_customer_shipping_fee(margin_rate: int, list_price: int) -> int:
 
     # 공급률 73%+: 항상 2,300원 (조건부 60,000원 무료배송)
     return DEFAULT_SHIPPING_COST
+
+
+# ─────────────────────────────────────────────
+# 거래처(총판) ↔ 출판사 매핑
+# ─────────────────────────────────────────────
+DISTRIBUTOR_MAP = {
+    "제일": ["비상교육", "수경"],
+    "대성": ["이투스", "희망"],
+    "일신": ["한국교육방송", "EBS", "좋은책신사고", "동아"],
+    "서부": ["마더텅", "개념원리", "능률교육", "꿈틀", "쏠티북스"],
+    "북전": ["키출판사", "에듀윌"],
+    "동아": ["에듀원", "에듀플라자", "베스트", "쎄듀"],
+    "강우사": ["디딤돌", "미래엔"],
+    "대원": ["폴리북스", "팩토", "매스티안", "소마"],
+}
+
+# 시리즈명/브랜드 → 출판사 매핑 (옵션명에 출판사가 안 나올 때 시리즈명으로 2차 매칭)
+SERIES_TO_PUBLISHER = {
+    # 비상교육
+    "완자": "비상교육", "오투": "비상교육", "한끝": "비상교육",
+    "개념+유형": "비상교육", "개념 + 유형": "비상교육",
+    "만렙": "비상교육", "내공의힘": "비상교육",
+    # 좋은책신사고
+    "쎈": "좋은책신사고", "라이트쎈": "좋은책신사고", "베이직쎈": "좋은책신사고",
+    "일품": "좋은책신사고", "쎈개념연산": "좋은책신사고",
+    # 한국교육방송/EBS
+    "수능특강": "EBS", "수능완성": "EBS",
+    # 개념원리
+    "개념원리": "개념원리", "RPM": "개념원리", "알피엠": "개념원리",
+    # 능률교육
+    "능률 Voca": "능률교육", "능률보카": "능률교육", "GRAMMAR JOY": "능률교육",
+    "GRAMMER JOY": "능률교육",
+    # 디딤돌
+    "디딤돌": "디딤돌", "최상위수학": "디딤돌", "최상위": "디딤돌",
+    # 미래엔
+    "자이스토리": "미래엔",
+    # 마더텅
+    "마더텅": "마더텅",
+    # 동아출판
+    "동아 백점": "동아", "백점": "동아",
+    # 키출판사
+    "키출판사": "키출판사",
+    # 에듀윌
+    "에듀윌": "에듀윌",
+    # 이투스 (대성)
+    "마플": "이투스", "마플교과서": "이투스", "수학의바이블": "이투스",
+    # 에듀원 (동아)
+    "100발 100중": "에듀원", "백발백중": "에듀원",
+    # 좋은책신사고 추가
+    "라이트쎈": "좋은책신사고",
+}
+
+# 역방향 매핑 (출판사→거래처) - substring 매칭용으로 긴 이름 우선 정렬
+_PUBLISHER_TO_DISTRIBUTOR = {}
+for _dist, _pubs in DISTRIBUTOR_MAP.items():
+    for _pub in _pubs:
+        _PUBLISHER_TO_DISTRIBUTOR[_pub] = _dist
+
+
+def resolve_distributor(publisher_name: str) -> str:
+    """출판사명 → 거래처명 (substring 매칭, 미매칭 시 '일반')"""
+    if not publisher_name:
+        return "일반"
+    # 정확 매칭 우선
+    if publisher_name in _PUBLISHER_TO_DISTRIBUTOR:
+        return _PUBLISHER_TO_DISTRIBUTOR[publisher_name]
+    # substring 매칭 (긴 이름 우선)
+    for pub in sorted(_PUBLISHER_TO_DISTRIBUTOR.keys(), key=len, reverse=True):
+        if pub in publisher_name or publisher_name in pub:
+            return _PUBLISHER_TO_DISTRIBUTOR[pub]
+    return "일반"
+
+
+def match_publisher_from_text(text: str, pub_names: list) -> str:
+    """상품명/옵션명에서 출판사 매칭 (DB 출판사명 → 시리즈명 순)
+
+    Args:
+        text: 검색할 텍스트 (vendor_item_name 또는 seller_product_name)
+        pub_names: DB publishers 테이블의 활성 출판사명 리스트 (긴 이름 우선)
+    Returns:
+        매칭된 출판사명 (없으면 빈 문자열)
+    """
+    if not text:
+        return ""
+    # 1차: DB 출판사명 직접 매칭
+    for pn in pub_names:
+        if pn in text:
+            return pn
+    # 2차: 시리즈명/브랜드로 매칭 (긴 이름 우선)
+    for series in sorted(SERIES_TO_PUBLISHER.keys(), key=len, reverse=True):
+        if series in text:
+            return SERIES_TO_PUBLISHER[series]
+    return ""
 
 
 def determine_delivery_charge_type(margin_rate: int, list_price: int) -> tuple:

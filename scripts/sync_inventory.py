@@ -20,11 +20,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Callable, List
 
-from sqlalchemy import create_engine, text, inspect
+from sqlalchemy import text, inspect
 
 # 프로젝트 루트
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
+
+from app.database import get_engine_for_db
 
 from dotenv import load_dotenv
 load_dotenv(ROOT / ".env")
@@ -65,23 +67,7 @@ class InventorySync:
     }
 
     def __init__(self, db_path: str = None):
-        if db_path is None:
-            db_path = str(ROOT / "coupang_auto.db")
-        self.engine = create_engine(
-            f"sqlite:///{db_path}",
-            connect_args={"check_same_thread": False, "timeout": 30}
-        )
-        # SQLite WAL 모드 + busy_timeout (동시 접근 허용)
-        from sqlalchemy import event as _sa_event
-        @_sa_event.listens_for(self.engine, "connect")
-        def _set_sqlite_pragma(dbapi_conn, connection_record):
-            cursor = dbapi_conn.cursor()
-            cursor.execute("PRAGMA busy_timeout=30000")
-            try:
-                cursor.execute("PRAGMA journal_mode=WAL")
-            except Exception:
-                pass
-            cursor.close()
+        self.engine = get_engine_for_db(db_path)
         self._ensure_tables()
         self._migrate_listing_columns()
 
