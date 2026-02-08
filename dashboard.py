@@ -1397,7 +1397,7 @@ elif page == "신규 등록":
                 _label += f" | 미승인 {_unapproved_cnt}건 제외"
             st.markdown(_label)
         with cb2:
-            dry = st.checkbox("Dry Run", value=True, key="dry", help="실제 등록 안 하고 확인만")
+            dry = st.checkbox("Dry Run", value=False, key="dry", help="체크 시 실제 등록 안 하고 확인만")
         with cb3:
             btn = st.button(
                 f"{'테스트' if dry else '쿠팡에 등록'} ({_total_jobs}건)",
@@ -1486,6 +1486,11 @@ elif page == "신규 등록":
                     st.dataframe(pd.DataFrame(fail_list), width="stretch", hide_index=True)
             query_df.clear()
             st.session_state.pop("nr_sel_titles", None)
+            if ok_list and not dry:
+                import time
+                time.sleep(1)
+                st.cache_data.clear()
+                st.rerun()
 
 
 # ═══════════════════════════════════════
