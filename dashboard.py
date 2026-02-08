@@ -1400,8 +1400,8 @@ elif page == "신규 등록":
             dry = st.checkbox("Dry Run", value=True, key="dry", help="실제 등록 안 하고 확인만")
         with cb3:
             btn = st.button(
-                f"{'테스트' if dry else '쿠팡에 등록'} ({_approved_cnt}건 x {_nr_sel_acc_cnt}계정)",
-                type="primary", disabled=(_approved_cnt == 0 or _nr_sel_acc_cnt == 0),
+                f"{'테스트' if dry else '쿠팡에 등록'} ({_total_jobs}건)",
+                type="primary", disabled=(_total_jobs == 0 or _nr_sel_acc_cnt == 0),
             )
 
         if btn and _approved_cnt > 0 and _nr_sel_acc_cnt > 0:
