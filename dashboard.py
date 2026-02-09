@@ -3754,95 +3754,38 @@ elif page == "주문":
 
     # ── 도서명 정리 함수 ──
     def _clean_book_name(name: str) -> str:
-        """발주서용 도서명 정리: 노이즈 제거"""
+        """발주서용 도서명 정리: 사은품/증정/선물 관련만 제거"""
         s = str(name or "").strip()
-        # (사은품) 태그
         s = _re.sub(r'^\(사은품\)\s*', '', s)
-        # 연도 패턴: (2026년), (2026), 2026년, 앞에 붙은 2026 등
-        s = _re.sub(r'\(\d{4}년?\)', '', s)
-        s = _re.sub(r'\(\d{4}학년도[^)]*\)', '', s)
-        s = _re.sub(r'\(\d{4}\s*개정[^)]*\)', '', s)
-        s = _re.sub(r'\(\d{4}년?\s*수능대비\)', '', s)
-        s = _re.sub(r'\d{4}학년도\s*', '', s)
-        s = _re.sub(r'^\d{4}\s+', '', s)  # 맨 앞 연도
-        s = _re.sub(r'\d{4}년\s*', '', s)
-        # 수능대비 등
-        s = _re.sub(r'\(?\d{4}\s*수능대비\)?', '', s)
-        # +사은품, +선물, +증정, 사은품증정
         s = _re.sub(r'\+사은품.*$', '', s)
         s = _re.sub(r'\+선물.*$', '', s)
         s = _re.sub(r'\+증정.*$', '', s)
         s = _re.sub(r'사은품증정', '', s)
-        s = _re.sub(r'\+\s*사은품', '', s)
-        # 전N권
-        s = _re.sub(r'\(전\d+권\)', '', s)
-        s = _re.sub(r'전\d+권', '', s)
-        # [출판사] 대괄호 태그
+        s = _re.sub(r'\s+\S*\+\S*\s*증정.*$', '', s)
+        s = _re.sub(r'\s+\S+\s+증정.*$', '', s)
         s = _re.sub(r'\s*\[[^\]]*\]', '', s)
-        # 동영상 강의 무료 등 부가 문구
-        s = _re.sub(r'\+\s*동영상.*$', '', s)
-        # - 출판사명 제공/적용
-        s = _re.sub(r'\s*-\s*\S+제공.*$', '', s)
-        s = _re.sub(r'\s*-\s*\S+적용.*$', '', s)
-        # 공백 정리
         s = _re.sub(r'\s{2,}', ' ', s).strip()
-        s = s.rstrip('-').rstrip('+').strip()
+        s = s.rstrip('+').strip()
         return s if s else str(name or "").strip()
 
     # ── 세트 분리 함수 ──
     def _split_set_name(name: str) -> list:
-        """세트 상품명 → 개별 도서명 리스트"""
+        """세트 상품명 → 개별 도서명 리스트 (+ 기준 단순 분리)"""
         if '+' not in name:
             return [name]
-        clean = name
-        clean = _re.sub(r'\(사은품\)\s*', '', clean)
-        clean = _re.sub(r'\+선물', '', clean)
-        clean = _re.sub(r'\+사은품', '', clean)
-        clean = _re.sub(r'\+증정', '', clean)
-        clean = _re.sub(r'\(전\d+권\)', '', clean)
-        clean = _re.sub(r'전\d+권', '', clean)
-        clean = _re.sub(r'\(\d{4}년?\)', '', clean)
-        clean = _re.sub(r'\(2022\s*개정[^)]*\)', '', clean)
+        # 사은품/선물/증정 관련 +는 분리 대상이 아님
+        clean = _re.sub(r'\+사은품.*$', '', name)
+        clean = _re.sub(r'\+선물.*$', '', clean)
+        clean = _re.sub(r'\+증정.*$', '', clean)
         clean = _re.sub(r'사은품증정', '', clean)
-        _shared_suffix = ""
-        _set_match = _re.search(r'세트\s*[-–]?\s*(.+)$', clean)
-        if _set_match:
-            _suffix_candidate = _set_match.group(1).strip()
-            _suffix_clean = _re.sub(r'\d{4}년', '', _suffix_candidate).strip()
-            _suffix_clean = _re.sub(r'\(.*?\)', '', _suffix_clean).strip()
-            _suffix_clean = _suffix_clean.rstrip('-').strip()
-            _suffix_clean = _re.sub(r'\s*-\s*\S+제공.*$', '', _suffix_clean)
-            _suffix_clean = _re.sub(r'\s*-\s*\S+적용.*$', '', _suffix_clean)
-            if 2 <= len(_suffix_clean) <= 15 and not _re.match(r'^[\d\s\-]+$', _suffix_clean):
-                _shared_suffix = _suffix_clean
         clean = _re.sub(r'\s*세트\s*[-–]?\s*.*$', '', clean)
-        clean = _re.sub(r'\d{4}년', '', clean)
-        clean = clean.strip().rstrip('-').strip()
+        clean = clean.strip()
         if '+' not in clean:
-            return [name]
+            return [_clean_book_name(name)]
         parts = [p.strip() for p in clean.split('+') if p.strip()]
         if len(parts) < 2:
-            return [name]
-        result = [parts[0]]
-        for p in parts[1:]:
-            if _re.match(r'^[\d\-]+$', p.strip()):
-                prefix = _re.sub(r'\s*\d+[\-]\d+\s*$', '', parts[0]).strip()
-                if not prefix:
-                    prefix = _re.sub(r'\s+\d+\s*$', '', parts[0]).strip()
-                result.append(f"{prefix} {p.strip()}")
-            else:
-                result.append(p)
-        if _shared_suffix:
-            result = [f"{r} {_shared_suffix}" if _shared_suffix not in r else r for r in result]
-        if len(result) >= 2:
-            first = result[0]
-            words = first.rsplit(' ', 1)
-            base_prefix = words[0] if len(words) > 1 else ""
-            if base_prefix and len(base_prefix) > 4:
-                for i in range(1, len(result)):
-                    if len(result[i]) <= 4 and not _re.search(r'\d', result[i]):
-                        result[i] = f"{base_prefix} {result[i]}"
-        return result
+            return [_clean_book_name(name)]
+        return parts
 
     # ── 3개 탭 ──
     _ord_tab1, _ord_tab2, _ord_tab3 = st.tabs(["결제완료", "상품준비중", "종합"])
@@ -4085,7 +4028,8 @@ elif page == "주문":
                                 top=_Sd(style='thin'), bottom=_Sd(style='thin'))
 
                     # 전체 목록 시트
-                    _raw_agg = _dist_df.groupby("옵션명").agg(수량=("수량", "sum")).reset_index().sort_values("옵션명")
+                    _dist_df["옵션명_clean"] = _dist_df["옵션명"].apply(_clean_book_name)
+                    _raw_agg = _dist_df.groupby("옵션명_clean").agg(수량=("수량", "sum")).reset_index().rename(columns={"옵션명_clean": "옵션명"}).sort_values("옵션명")
                     _raw_agg.to_excel(writer, sheet_name="전체", index=False, startrow=1)
                     _ws0 = writer.sheets["전체"]
                     _ws0.merge_cells(start_row=1, start_column=1, end_row=1, end_column=2)
