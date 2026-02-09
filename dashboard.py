@@ -3752,41 +3752,6 @@ elif page == "주문":
         else:
             return f"{val:,}"
 
-    # ── 도서명 정리 함수 ──
-    def _clean_book_name(name: str) -> str:
-        """발주서용 도서명 정리: 사은품/증정/선물 관련만 제거"""
-        s = str(name or "").strip()
-        s = _re.sub(r'^\(사은품\)\s*', '', s)
-        s = _re.sub(r'\+사은품.*$', '', s)
-        s = _re.sub(r'\+선물.*$', '', s)
-        s = _re.sub(r'\+증정.*$', '', s)
-        s = _re.sub(r'사은품증정', '', s)
-        s = _re.sub(r'\s+\S*\+\S*\s*증정.*$', '', s)
-        s = _re.sub(r'\s+\S+\s+증정.*$', '', s)
-        s = _re.sub(r'\s*\[[^\]]*\]', '', s)
-        s = _re.sub(r'\s{2,}', ' ', s).strip()
-        s = s.rstrip('+').strip()
-        return s if s else str(name or "").strip()
-
-    # ── 세트 분리 함수 ──
-    def _split_set_name(name: str) -> list:
-        """세트 상품명 → 개별 도서명 리스트 (+ 기준 단순 분리)"""
-        if '+' not in name:
-            return [name]
-        # 사은품/선물/증정 관련 +는 분리 대상이 아님
-        clean = _re.sub(r'\+사은품.*$', '', name)
-        clean = _re.sub(r'\+선물.*$', '', clean)
-        clean = _re.sub(r'\+증정.*$', '', clean)
-        clean = _re.sub(r'사은품증정', '', clean)
-        clean = _re.sub(r'\s*세트\s*[-–]?\s*.*$', '', clean)
-        clean = clean.strip()
-        if '+' not in clean:
-            return [_clean_book_name(name)]
-        parts = [p.strip() for p in clean.split('+') if p.strip()]
-        if len(parts) < 2:
-            return [_clean_book_name(name)]
-        return parts
-
     # ── 3개 탭 ──
     _ord_tab1, _ord_tab2, _ord_tab3 = st.tabs(["결제완료", "상품준비중", "종합"])
 
@@ -3943,13 +3908,6 @@ elif page == "주문":
             # ── 섹션 2: 거래처별 발주서 ──
             st.subheader("거래처별 발주서")
 
-            _dc1, _dc2 = st.columns([3, 1])
-            with _dc1:
-                _dist_split_set = st.checkbox("세트 상품 개별 분리", value=True, key="dist_split_set",
-                                              help="'완자+기출픽 세트' 같은 묶음을 개별 도서로 나눕니다")
-            with _dc2:
-                pass
-
             # INSTRUCT + DEPARTURE 합산 (API 실시간)
             _departure_live = _fetch_live_orders("DEPARTURE")
             _departure_all = _departure_live[~_departure_live["취소"]].copy() if not _departure_live.empty else pd.DataFrame()
@@ -3959,7 +3917,7 @@ elif page == "주문":
             if _dist_orders.empty:
                 st.info("발주서 대상 주문이 없습니다.")
             else:
-                # 출판사 매칭
+                # 출판사 매칭 (거래처 그룹핑용)
                 _pub_list = query_df("SELECT name FROM publishers WHERE is_active = 1 ORDER BY LENGTH(name) DESC")
                 _pub_names = _pub_list["name"].tolist() if not _pub_list.empty else []
 
@@ -3969,32 +3927,9 @@ elif page == "주문":
                         result = match_publisher_from_text(str(row.get("상품명") or ""), _pub_names)
                     return result
 
-                # 세트 분리 처리 (옵션명 첫 콤마 구간 기반)
-                if _dist_split_set:
-                    _expanded_rows = []
-                    for _, row in _dist_orders.iterrows():
-                        # 옵션명 첫 콤마 구간 = 실제 도서명
-                        _opt_raw = str(row["옵션명"] or row["상품명"] or "")
-                        _opt_title = _opt_raw.split(",")[0].strip()
-                        parts = _split_set_name(_opt_title)
-                        if len(parts) >= 2:
-                            price_each = int(row["결제금액"]) // len(parts) if pd.notna(row["결제금액"]) else 0
-                            for pi, part in enumerate(parts):
-                                new_row = row.copy()
-                                new_row["도서명"] = part.strip()
-                                new_row["결제금액"] = price_each if pi < len(parts) - 1 else int(row["결제금액"] or 0) - price_each * (len(parts) - 1)
-                                new_row["원주문"] = _opt_title
-                                _expanded_rows.append(new_row)
-                        else:
-                            row_copy = row.copy()
-                            row_copy["도서명"] = _opt_title
-                            row_copy["원주문"] = ""
-                            _expanded_rows.append(row_copy)
-                    _dist_df = pd.DataFrame(_expanded_rows)
-                else:
-                    _dist_orders["도서명"] = _dist_orders["옵션명"].apply(lambda x: str(x).split(",")[0].strip())
-                    _dist_orders["원주문"] = ""
-                    _dist_df = _dist_orders
+                # 도서명: 옵션명 첫 번째 콤마 구간 그대로 사용
+                _dist_orders["도서명"] = _dist_orders["옵션명"].apply(lambda x: str(x).split(",")[0].strip())
+                _dist_df = _dist_orders
 
                 _dist_df["출판사"] = _dist_df.apply(_match_pub, axis=1)
                 _dist_df["거래처"] = _dist_df["출판사"].apply(resolve_distributor)
@@ -4010,11 +3945,10 @@ elif page == "주문":
                 st.dataframe(_dist_summary, hide_index=True, width="stretch")
 
                 # Excel 다운로드
-                _dist_df["도서명_clean"] = _dist_df["도서명"].apply(_clean_book_name)
-                _agg = _dist_df.groupby(["거래처", "출판사", "도서명_clean"]).agg(
+                _agg = _dist_df.groupby(["거래처", "도서명"]).agg(
                     주문수량=("수량", "sum"),
-                ).reset_index().rename(columns={"도서명_clean": "도서명"})
-                _agg = _agg.sort_values(["거래처", "출판사", "도서명"])
+                ).reset_index()
+                _agg = _agg.sort_values(["거래처", "도서명"])
 
                 _dist_names_sorted = _dist_summary["거래처"].tolist()
 
@@ -4027,9 +3961,8 @@ elif page == "주문":
                     _bdr = _Bdr(left=_Sd(style='thin'), right=_Sd(style='thin'),
                                 top=_Sd(style='thin'), bottom=_Sd(style='thin'))
 
-                    # 전체 목록 시트
-                    _dist_df["옵션명_clean"] = _dist_df["옵션명"].apply(_clean_book_name)
-                    _raw_agg = _dist_df.groupby("옵션명_clean").agg(수량=("수량", "sum")).reset_index().rename(columns={"옵션명_clean": "옵션명"}).sort_values("옵션명")
+                    # 전체 목록 시트 (옵션명 원본 | 수량)
+                    _raw_agg = _dist_df.groupby("옵션명").agg(수량=("수량", "sum")).reset_index().sort_values("옵션명")
                     _raw_agg.to_excel(writer, sheet_name="전체", index=False, startrow=1)
                     _ws0 = writer.sheets["전체"]
                     _ws0.merge_cells(start_row=1, start_column=1, end_row=1, end_column=2)
@@ -4056,41 +3989,40 @@ elif page == "주문":
                         c.fill = _hf
                         c.font = _Font(bold=True, color="FFFFFF")
 
-                    # 거래처별 시트
+                    # 거래처별 시트 (도서명 | 주문수량)
                     _dist_order = ["제일", "대성", "일신", "서부", "북전", "동아", "강우사", "대원", "일반"]
                     _all_dists = sorted(_agg["거래처"].unique(),
                                         key=lambda d: _dist_order.index(d) if d in _dist_order else 99)
                     for _dname in _all_dists:
-                        _sdf = _agg[_agg["거래처"] == _dname][["도서명", "출판사", "주문수량"]].copy()
+                        _sdf = _agg[_agg["거래처"] == _dname][["도서명", "주문수량"]].copy()
                         if _sdf.empty:
                             continue
-                        _sdf = _sdf.sort_values(["출판사", "도서명"])
+                        _sdf = _sdf.sort_values("도서명")
                         _safe = _dname[:31].replace("/", "_").replace("\\", "_")
                         _sdf.to_excel(writer, sheet_name=_safe, index=False, startrow=1)
                         ws = writer.sheets[_safe]
-                        ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=3)
+                        ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=2)
                         ws.cell(row=1, column=1).value = f"[{_dname}] 발주서 ({_ord_date_from_str} ~ {_ord_date_to_str})"
                         ws.cell(row=1, column=1).font = _Font(bold=True, size=13)
                         ws.cell(row=1, column=1).alignment = _AL(horizontal="center")
-                        for ci in range(1, 4):
+                        for ci in range(1, 3):
                             c = ws.cell(row=2, column=ci)
                             c.fill = _hf
                             c.font = _Font(bold=True, color="FFFFFF")
                             c.border = _bdr
                         for ri in range(3, 3 + len(_sdf)):
-                            for ci in range(1, 4):
+                            for ci in range(1, 3):
                                 ws.cell(row=ri, column=ci).border = _bdr
-                            ws.cell(row=ri, column=3).alignment = _AL(horizontal="center")
+                            ws.cell(row=ri, column=2).alignment = _AL(horizontal="center")
                         _sr = 3 + len(_sdf)
                         ws.cell(row=_sr, column=1, value="합계").font = _Font(bold=True)
                         ws.cell(row=_sr, column=1).fill = _sf
-                        ws.cell(row=_sr, column=3, value=int(_sdf["주문수량"].sum())).font = _Font(bold=True)
-                        ws.cell(row=_sr, column=3).fill = _sf
-                        for ci in range(1, 4):
+                        ws.cell(row=_sr, column=2, value=int(_sdf["주문수량"].sum())).font = _Font(bold=True)
+                        ws.cell(row=_sr, column=2).fill = _sf
+                        for ci in range(1, 3):
                             ws.cell(row=_sr, column=ci).border = _bdr
-                        ws.column_dimensions["A"].width = 45
-                        ws.column_dimensions["B"].width = 14
-                        ws.column_dimensions["C"].width = 10
+                        ws.column_dimensions["A"].width = 55
+                        ws.column_dimensions["B"].width = 10
 
                 _xl_buf.seek(0)
 
@@ -4111,12 +4043,12 @@ elif page == "주문":
                     default=_dist_names_sorted, key="dist_filter",
                 )
                 _filtered_agg = _agg[_agg["거래처"].isin(_dist_filter)] if _dist_filter else _agg
-                _show_agg = _filtered_agg[["거래처", "출판사", "도서명", "주문수량"]].copy()
+                _show_agg = _filtered_agg[["거래처", "도서명", "주문수량"]].copy()
 
                 gb = GridOptionsBuilder.from_dataframe(_show_agg)
                 gb.configure_pagination(paginationAutoPageSize=False, paginationPageSize=20)
                 gb.configure_default_column(resizable=True, sorteable=True, filterable=True)
-                gb.configure_column("도서명", width=350)
+                gb.configure_column("도서명", width=400)
                 gb.configure_column("주문수량", width=80)
                 grid_opts = gb.build()
                 AgGrid(_show_agg, gridOptions=grid_opts, height=500, theme="streamlit", key="dist_grid")
