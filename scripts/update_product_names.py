@@ -45,6 +45,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ─── 상품명에 넣으면 안 되는 브랜드/플레이스홀더 ────────────────
+EXCLUDED_BRANDS = {
+    "자체브랜드", "상세설명참조", "해당없음", "없음", "기타", "-",
+}
+
 
 # ─── 도서 유형 분류 ─────────────────────────────────────────────
 
@@ -155,6 +160,9 @@ def build_optimized_name(
         if not token or not token.strip():
             continue
         token = token.strip()
+        # 자체브랜드/플레이스홀더 제외
+        if token in EXCLUDED_BRANDS:
+            continue
         # 중복 체크: 토큰이 이미 base에 있으면 skip
         if token in base:
             continue
@@ -283,7 +291,7 @@ def update_product_name(
 
 def build_display_name(publisher: str, seller_name: str, max_len: int = 100) -> str:
     """displayProductName = 출판사 + sellerProductName (≤100자)"""
-    if not publisher or publisher in seller_name:
+    if not publisher or publisher in seller_name or publisher in EXCLUDED_BRANDS:
         return seller_name[:max_len]
     candidate = f"{publisher} {seller_name}"
     return candidate[:max_len]
