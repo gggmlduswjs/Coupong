@@ -3908,11 +3908,8 @@ elif page == "주문":
             # ── 섹션 2: 거래처별 발주서 ──
             st.subheader("거래처별 발주서")
 
-            # INSTRUCT + DEPARTURE 합산 (API 실시간)
-            _departure_live = _fetch_live_orders("DEPARTURE")
-            _departure_all = _departure_live[~_departure_live["취소"]].copy() if not _departure_live.empty else pd.DataFrame()
-            _dist_frames = [df for df in [_instruct_all, _departure_all] if not df.empty]
-            _dist_orders = pd.concat(_dist_frames, ignore_index=True) if _dist_frames else pd.DataFrame()
+            # 상품준비중(INSTRUCT)만 발주서 대상 (API 실시간)
+            _dist_orders = _instruct_all.copy() if not _instruct_all.empty else pd.DataFrame()
 
             if _dist_orders.empty:
                 st.info("발주서 대상 주문이 없습니다.")
@@ -3927,8 +3924,8 @@ elif page == "주문":
                         result = match_publisher_from_text(str(row.get("상품명") or ""), _pub_names)
                     return result
 
-                # 도서명: 옵션명 첫 번째 콤마 구간 그대로 사용
-                _dist_orders["도서명"] = _dist_orders["옵션명"].apply(lambda x: str(x).split(",")[0].strip())
+                # 도서명: 옵션명 원본 그대로 사용
+                _dist_orders["도서명"] = _dist_orders["옵션명"].apply(lambda x: str(x).strip())
                 _dist_df = _dist_orders
 
                 _dist_df["출판사"] = _dist_df.apply(_match_pub, axis=1)
@@ -3945,10 +3942,10 @@ elif page == "주문":
                 st.dataframe(_dist_summary, hide_index=True, width="stretch")
 
                 # Excel 다운로드
-                _agg = _dist_df.groupby(["거래처", "도서명"]).agg(
+                _agg = _dist_df.groupby(["거래처", "출판사", "도서명"]).agg(
                     주문수량=("수량", "sum"),
                 ).reset_index()
-                _agg = _agg.sort_values(["거래처", "도서명"])
+                _agg = _agg.sort_values(["거래처", "출판사", "도서명"])
 
                 _dist_names_sorted = _dist_summary["거래처"].tolist()
 
@@ -3989,40 +3986,41 @@ elif page == "주문":
                         c.fill = _hf
                         c.font = _Font(bold=True, color="FFFFFF")
 
-                    # 거래처별 시트 (도서명 | 주문수량)
+                    # 거래처별 시트 (도서명 | 출판사 | 주문수량)
                     _dist_order = ["제일", "대성", "일신", "서부", "북전", "동아", "강우사", "대원", "일반"]
                     _all_dists = sorted(_agg["거래처"].unique(),
                                         key=lambda d: _dist_order.index(d) if d in _dist_order else 99)
                     for _dname in _all_dists:
-                        _sdf = _agg[_agg["거래처"] == _dname][["도서명", "주문수량"]].copy()
+                        _sdf = _agg[_agg["거래처"] == _dname][["도서명", "출판사", "주문수량"]].copy()
                         if _sdf.empty:
                             continue
-                        _sdf = _sdf.sort_values("도서명")
+                        _sdf = _sdf.sort_values(["출판사", "도서명"])
                         _safe = _dname[:31].replace("/", "_").replace("\\", "_")
                         _sdf.to_excel(writer, sheet_name=_safe, index=False, startrow=1)
                         ws = writer.sheets[_safe]
-                        ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=2)
+                        ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=3)
                         ws.cell(row=1, column=1).value = f"[{_dname}] 발주서 ({_ord_date_from_str} ~ {_ord_date_to_str})"
                         ws.cell(row=1, column=1).font = _Font(bold=True, size=13)
                         ws.cell(row=1, column=1).alignment = _AL(horizontal="center")
-                        for ci in range(1, 3):
+                        for ci in range(1, 4):
                             c = ws.cell(row=2, column=ci)
                             c.fill = _hf
                             c.font = _Font(bold=True, color="FFFFFF")
                             c.border = _bdr
                         for ri in range(3, 3 + len(_sdf)):
-                            for ci in range(1, 3):
+                            for ci in range(1, 4):
                                 ws.cell(row=ri, column=ci).border = _bdr
-                            ws.cell(row=ri, column=2).alignment = _AL(horizontal="center")
+                            ws.cell(row=ri, column=3).alignment = _AL(horizontal="center")
                         _sr = 3 + len(_sdf)
                         ws.cell(row=_sr, column=1, value="합계").font = _Font(bold=True)
                         ws.cell(row=_sr, column=1).fill = _sf
-                        ws.cell(row=_sr, column=2, value=int(_sdf["주문수량"].sum())).font = _Font(bold=True)
-                        ws.cell(row=_sr, column=2).fill = _sf
-                        for ci in range(1, 3):
+                        ws.cell(row=_sr, column=3, value=int(_sdf["주문수량"].sum())).font = _Font(bold=True)
+                        ws.cell(row=_sr, column=3).fill = _sf
+                        for ci in range(1, 4):
                             ws.cell(row=_sr, column=ci).border = _bdr
                         ws.column_dimensions["A"].width = 55
-                        ws.column_dimensions["B"].width = 10
+                        ws.column_dimensions["B"].width = 14
+                        ws.column_dimensions["C"].width = 10
 
                 _xl_buf.seek(0)
 
@@ -4043,12 +4041,12 @@ elif page == "주문":
                     default=_dist_names_sorted, key="dist_filter",
                 )
                 _filtered_agg = _agg[_agg["거래처"].isin(_dist_filter)] if _dist_filter else _agg
-                _show_agg = _filtered_agg[["거래처", "도서명", "주문수량"]].copy()
+                _show_agg = _filtered_agg[["거래처", "출판사", "도서명", "주문수량"]].copy()
 
                 gb = GridOptionsBuilder.from_dataframe(_show_agg)
                 gb.configure_pagination(paginationAutoPageSize=False, paginationPageSize=20)
                 gb.configure_default_column(resizable=True, sorteable=True, filterable=True)
-                gb.configure_column("도서명", width=400)
+                gb.configure_column("도서명", width=350)
                 gb.configure_column("주문수량", width=80)
                 grid_opts = gb.build()
                 AgGrid(_show_agg, gridOptions=grid_opts, height=500, theme="streamlit", key="dist_grid")

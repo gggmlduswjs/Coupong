@@ -145,16 +145,16 @@ def export_order_sheets(days: int = 7, account_name: str = None,
 
     orders["출판사"] = orders.apply(_resolve_publisher, axis=1)
 
-    # 도서명: 옵션명(vendor_item_name) 첫 번째 콤마 구간 그대로 사용
-    orders["도서명"] = orders["옵션명"].apply(lambda x: str(x).split(",")[0].strip())
+    # 도서명: 옵션명(vendor_item_name) 원본 그대로 사용
+    orders["도서명"] = orders["옵션명"].apply(lambda x: str(x).strip())
 
     # 거래처 매핑
     orders["거래처"] = orders["출판사"].apply(resolve_distributor)
 
     # ===== 도서별 합산 =====
-    agg = orders.groupby(["거래처", "도서명"]).agg(
+    agg = orders.groupby(["거래처", "출판사", "도서명"]).agg(
         주문수량=("수량", "sum"),
-    ).reset_index().sort_values(["거래처", "도서명"])
+    ).reset_index().sort_values(["거래처", "출판사", "도서명"])
 
     # 출력 파일명
     if not output:
@@ -186,27 +186,28 @@ def export_order_sheets(days: int = 7, account_name: str = None,
         ws_sum.column_dimensions["B"].width = 10
         ws_sum.column_dimensions["C"].width = 10
 
-        # --- 3) 거래처별 시트 (도서명 | 주문수량) ---
+        # --- 3) 거래처별 시트 (도서명 | 출판사 | 주문수량) ---
         dist_order = ["제일", "대성", "일신", "서부", "북전", "동아", "강우사", "대원", "일반"]
         all_dists = sorted(agg["거래처"].unique(), key=lambda d: dist_order.index(d) if d in dist_order else 99)
 
         for dist_name in all_dists:
-            sheet_df = agg[agg["거래처"] == dist_name][["도서명", "주문수량"]].copy()
+            sheet_df = agg[agg["거래처"] == dist_name][["도서명", "출판사", "주문수량"]].copy()
             if sheet_df.empty:
                 continue
-            sheet_df = sheet_df.sort_values("도서명")
+            sheet_df = sheet_df.sort_values(["출판사", "도서명"])
 
             safe_name = dist_name[:31].replace("/", "_").replace("\\", "_")
             sheet_df.to_excel(writer, sheet_name=safe_name, index=False, startrow=1)
 
             ws = writer.sheets[safe_name]
-            _style_sheet(ws, 2, len(sheet_df),
+            _style_sheet(ws, 3, len(sheet_df),
                          f"[{dist_name}] 발주서 ({date_from} ~ {date_to})")
             ws.column_dimensions["A"].width = 55
-            ws.column_dimensions["B"].width = 10
+            ws.column_dimensions["B"].width = 14
+            ws.column_dimensions["C"].width = 10
             # 수량 열 가운데 정렬
             for ri in range(3, 3 + len(sheet_df)):
-                ws.cell(row=ri, column=2).alignment = Alignment(horizontal="center")
+                ws.cell(row=ri, column=3).alignment = Alignment(horizontal="center")
 
         # --- 4) 거래처-출판사 매핑표 시트 ---
         from app.constants import DISTRIBUTOR_MAP
