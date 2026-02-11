@@ -187,7 +187,7 @@ def _render_profit_tab(accounts_df, account_names):
         try:
             from scripts.sync_revenue import RevenueSync
             months = {7: 1, 30: 1, 90: 3}[days_back]
-            syncer = RevenueSync(db_path=str(DB_PATH))
+            syncer = RevenueSync()
             acct_arg = None if account_filter == "전체" else account_filter
             sync_progress = st.progress(0, text="매출 동기화 중...")
             results = syncer.sync_all(

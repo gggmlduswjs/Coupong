@@ -507,7 +507,7 @@ def render(selected_account, accounts_df, account_names):
         if _btn_inv_sync:
             try:
                 from scripts.sync_inventory import InventorySync
-                syncer = InventorySync(db_path=str(DB_PATH))
+                syncer = InventorySync()
                 _inv_acct_arg = None if _inv_acct == "전체" else _inv_acct
                 _inv_progress = st.progress(0, text="가격/재고 동기화 중...")
                 _inv_results = syncer.sync_all(
