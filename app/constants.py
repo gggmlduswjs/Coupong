@@ -301,3 +301,16 @@ def determine_delivery_charge_type(margin_rate: int, list_price: int) -> tuple:
 
     # 그 외 (~65%): 조건부 2만원 무료배송
     return ("CONDITIONAL_FREE", customer_fee, CONDITIONAL_FREE_THRESHOLD)
+
+
+# ─────────────────────────────────────────────
+# 사은품/증정품 필터 (발주서에서 제외)
+# ─────────────────────────────────────────────
+GIFT_FILTER_KEYWORDS = ['사은품', '선물', '증정', '증정품', '부록', '사은', '임지']
+
+
+def is_gift_item(item_name: str) -> bool:
+    """상품명/옵션명이 사은품·증정품인지 판별"""
+    if not item_name:
+        return False
+    return any(kw in item_name for kw in GIFT_FILTER_KEYWORDS)

@@ -21,7 +21,7 @@ from sqlalchemy import text
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 
 from app.database import engine
-from app.constants import resolve_distributor, match_publisher_from_text
+from app.constants import resolve_distributor, match_publisher_from_text, is_gift_item
 
 
 def query_df(sql: str, params: dict = None) -> pd.DataFrame:
@@ -114,13 +114,17 @@ def export_order_sheets(days: int = 7, account_name: str = None,
     status_where = "" if all_status else "AND o.status = 'INSTRUCT'"
     date_where = f"AND DATE(o.ordered_at) >= '{date_from.isoformat()}' AND DATE(o.ordered_at) <= '{date_to.isoformat()}'"
 
-    # DB JOIN으로 실제 출판사 가져오기 (orders → listings → products → books → publishers)
+    # DB JOIN으로 실제 출판사·ISBN·저자 가져오기
     orders = query_df(f"""
         SELECT
             o.seller_product_name as 상품명,
             o.vendor_item_name as 옵션명,
             o.shipping_count as 수량,
-            pub.name as DB출판사
+            pub.name as DB출판사,
+            COALESCE(l.isbn, b.isbn) as ISBN,
+            b.title as DB도서명,
+            b.author as 저자,
+            b.year as 출판년도
         FROM orders o
         LEFT JOIN listings l ON o.listing_id = l.id
         LEFT JOIN products p ON l.product_id = p.id
@@ -134,6 +138,17 @@ def export_order_sheets(days: int = 7, account_name: str = None,
         print("해당 조건의 주문이 없습니다.")
         return
 
+    # 사은품/증정품 필터링
+    before_filter = len(orders)
+    orders = orders[~orders["옵션명"].apply(lambda x: is_gift_item(str(x)))].copy()
+    filtered_count = before_filter - len(orders)
+    if filtered_count > 0:
+        print(f"사은품/증정품 {filtered_count}건 제외됨")
+
+    if orders.empty:
+        print("사은품 제외 후 주문이 없습니다.")
+        return
+
     # 출판사 매칭: DB JOIN 우선 → 텍스트 매칭 fallback (거래처 그룹핑용)
     pub_names = get_publisher_names()
 
@@ -145,16 +160,29 @@ def export_order_sheets(days: int = 7, account_name: str = None,
 
     orders["출판사"] = orders.apply(_resolve_publisher, axis=1)
 
-    # 도서명: 옵션명(vendor_item_name) 원본 그대로 사용
-    orders["도서명"] = orders["옵션명"].apply(lambda x: str(x).strip())
+    # 도서명: DB도서명 우선, 없으면 옵션명
+    orders["도서명"] = orders.apply(
+        lambda r: str(r["DB도서명"]).strip() if pd.notna(r.get("DB도서명")) and r["DB도서명"] else str(r["옵션명"]).strip(),
+        axis=1
+    )
+
+    # ISBN 정리
+    orders["ISBN"] = orders["ISBN"].apply(lambda x: str(x).strip() if pd.notna(x) and x else "")
 
     # 거래처 매핑
     orders["거래처"] = orders["출판사"].apply(resolve_distributor)
 
-    # ===== 도서별 합산 =====
-    agg = orders.groupby(["거래처", "출판사", "도서명"]).agg(
+    # ===== 도서별 합산 (ISBN 기반 우선) =====
+    # ISBN이 있으면 ISBN 기준, 없으면 도서명 기준 그룹핑
+    orders["_group_key"] = orders.apply(
+        lambda r: r["ISBN"] if r["ISBN"] else r["도서명"],
+        axis=1
+    )
+    agg = orders.groupby(["거래처", "출판사", "_group_key"]).agg(
+        도서명=("도서명", "first"),
+        ISBN=("ISBN", "first"),
         주문수량=("수량", "sum"),
-    ).reset_index().sort_values(["거래처", "출판사", "도서명"])
+    ).reset_index().drop(columns=["_group_key"]).sort_values(["거래처", "출판사", "도서명"])
 
     # 출력 파일명
     if not output:
@@ -186,12 +214,12 @@ def export_order_sheets(days: int = 7, account_name: str = None,
         ws_sum.column_dimensions["B"].width = 10
         ws_sum.column_dimensions["C"].width = 10
 
-        # --- 3) 거래처별 시트 (도서명 | 출판사 | 주문수량) ---
+        # --- 3) 거래처별 시트 (ISBN | 도서명 | 출판사 | 주문수량) ---
         dist_order = ["제일", "대성", "일신", "서부", "북전", "동아", "강우사", "대원", "일반"]
         all_dists = sorted(agg["거래처"].unique(), key=lambda d: dist_order.index(d) if d in dist_order else 99)
 
         for dist_name in all_dists:
-            sheet_df = agg[agg["거래처"] == dist_name][["도서명", "출판사", "주문수량"]].copy()
+            sheet_df = agg[agg["거래처"] == dist_name][["ISBN", "도서명", "출판사", "주문수량"]].copy()
             if sheet_df.empty:
                 continue
             sheet_df = sheet_df.sort_values(["출판사", "도서명"])
@@ -200,14 +228,15 @@ def export_order_sheets(days: int = 7, account_name: str = None,
             sheet_df.to_excel(writer, sheet_name=safe_name, index=False, startrow=1)
 
             ws = writer.sheets[safe_name]
-            _style_sheet(ws, 3, len(sheet_df),
+            _style_sheet(ws, 4, len(sheet_df),
                          f"[{dist_name}] 발주서 ({date_from} ~ {date_to})")
-            ws.column_dimensions["A"].width = 55
-            ws.column_dimensions["B"].width = 14
-            ws.column_dimensions["C"].width = 10
+            ws.column_dimensions["A"].width = 16
+            ws.column_dimensions["B"].width = 55
+            ws.column_dimensions["C"].width = 14
+            ws.column_dimensions["D"].width = 10
             # 수량 열 가운데 정렬
             for ri in range(3, 3 + len(sheet_df)):
-                ws.cell(row=ri, column=3).alignment = Alignment(horizontal="center")
+                ws.cell(row=ri, column=4).alignment = Alignment(horizontal="center")
 
         # --- 4) 거래처-출판사 매핑표 시트 ---
         from app.constants import DISTRIBUTOR_MAP

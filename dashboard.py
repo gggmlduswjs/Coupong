@@ -3753,7 +3753,7 @@ elif page == "주문":
             return f"{val:,}"
 
     # ── 3개 탭 ──
-    _ord_tab1, _ord_tab2, _ord_tab3 = st.tabs(["결제완료", "상품준비중", "종합"])
+    _ord_tab1, _ord_tab2, _ord_tab3, _ord_tab4 = st.tabs(["결제완료", "상품준비중", "종합", "출고/극동"])
 
     # ══════════════════════════════════════
     # 탭1: 결제완료 (ACCEPT) — WING API 실시간
@@ -3911,6 +3911,15 @@ elif page == "주문":
             # 상품준비중(INSTRUCT)만 발주서 대상 (API 실시간)
             _dist_orders = _instruct_all.copy() if not _instruct_all.empty else pd.DataFrame()
 
+            # 사은품/증정품 필터링
+            if not _dist_orders.empty:
+                from app.constants import is_gift_item as _is_gift
+                _before = len(_dist_orders)
+                _dist_orders = _dist_orders[~_dist_orders["옵션명"].apply(lambda x: _is_gift(str(x)))].copy()
+                _gift_cnt = _before - len(_dist_orders)
+                if _gift_cnt > 0:
+                    st.caption(f"사은품/증정품 {_gift_cnt}건 제외됨")
+
             if _dist_orders.empty:
                 st.info("발주서 대상 주문이 없습니다.")
             else:
@@ -3924,8 +3933,31 @@ elif page == "주문":
                         result = match_publisher_from_text(str(row.get("상품명") or ""), _pub_names)
                     return result
 
-                # 도서명: 옵션명 원본 그대로 사용
-                _dist_orders["도서명"] = _dist_orders["옵션명"].apply(lambda x: str(x).strip())
+                # ISBN 조회: seller_product_id → listings → books
+                _isbn_lookup = query_df("""
+                    SELECT l.coupang_product_id, COALESCE(l.isbn, b.isbn) as isbn, b.title as db_title
+                    FROM listings l
+                    LEFT JOIN products p ON l.product_id = p.id
+                    LEFT JOIN books b ON p.book_id = b.id
+                    WHERE l.coupang_product_id IS NOT NULL AND l.coupang_product_id != ''
+                """)
+                _isbn_map = {}
+                if not _isbn_lookup.empty:
+                    for _, _r in _isbn_lookup.iterrows():
+                        _isbn_map[str(_r["coupang_product_id"])] = {
+                            "isbn": str(_r["isbn"]) if pd.notna(_r["isbn"]) else "",
+                            "title": str(_r["db_title"]) if pd.notna(_r["db_title"]) else "",
+                        }
+
+                # 도서명/ISBN: DB 우선, 없으면 옵션명
+                def _resolve_book_info(row):
+                    spid = str(row.get("_seller_product_id", ""))
+                    info = _isbn_map.get(spid, {})
+                    title = info.get("title") or str(row.get("옵션명", "")).strip()
+                    isbn = info.get("isbn", "")
+                    return pd.Series({"도서명": title, "ISBN": isbn})
+
+                _dist_orders[["도서명", "ISBN"]] = _dist_orders.apply(_resolve_book_info, axis=1)
                 _dist_df = _dist_orders
 
                 _dist_df["출판사"] = _dist_df.apply(_match_pub, axis=1)
@@ -3941,10 +3973,15 @@ elif page == "주문":
 
                 st.dataframe(_dist_summary, hide_index=True, width="stretch")
 
-                # Excel 다운로드
-                _agg = _dist_df.groupby(["거래처", "출판사", "도서명"]).agg(
+                # Excel 다운로드 (ISBN 기반 그룹핑)
+                _dist_df["_group_key"] = _dist_df.apply(
+                    lambda r: r["ISBN"] if r.get("ISBN") else r["도서명"], axis=1
+                )
+                _agg = _dist_df.groupby(["거래처", "출판사", "_group_key"]).agg(
+                    도서명=("도서명", "first"),
+                    ISBN=("ISBN", "first"),
                     주문수량=("수량", "sum"),
-                ).reset_index()
+                ).reset_index().drop(columns=["_group_key"])
                 _agg = _agg.sort_values(["거래처", "출판사", "도서명"])
 
                 _dist_names_sorted = _dist_summary["거래처"].tolist()
@@ -3986,41 +4023,42 @@ elif page == "주문":
                         c.fill = _hf
                         c.font = _Font(bold=True, color="FFFFFF")
 
-                    # 거래처별 시트 (도서명 | 출판사 | 주문수량)
+                    # 거래처별 시트 (ISBN | 도서명 | 출판사 | 주문수량)
                     _dist_order = ["제일", "대성", "일신", "서부", "북전", "동아", "강우사", "대원", "일반"]
                     _all_dists = sorted(_agg["거래처"].unique(),
                                         key=lambda d: _dist_order.index(d) if d in _dist_order else 99)
                     for _dname in _all_dists:
-                        _sdf = _agg[_agg["거래처"] == _dname][["도서명", "출판사", "주문수량"]].copy()
+                        _sdf = _agg[_agg["거래처"] == _dname][["ISBN", "도서명", "출판사", "주문수량"]].copy()
                         if _sdf.empty:
                             continue
                         _sdf = _sdf.sort_values(["출판사", "도서명"])
                         _safe = _dname[:31].replace("/", "_").replace("\\", "_")
                         _sdf.to_excel(writer, sheet_name=_safe, index=False, startrow=1)
                         ws = writer.sheets[_safe]
-                        ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=3)
+                        ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=4)
                         ws.cell(row=1, column=1).value = f"[{_dname}] 발주서 ({_ord_date_from_str} ~ {_ord_date_to_str})"
                         ws.cell(row=1, column=1).font = _Font(bold=True, size=13)
                         ws.cell(row=1, column=1).alignment = _AL(horizontal="center")
-                        for ci in range(1, 4):
+                        for ci in range(1, 5):
                             c = ws.cell(row=2, column=ci)
                             c.fill = _hf
                             c.font = _Font(bold=True, color="FFFFFF")
                             c.border = _bdr
                         for ri in range(3, 3 + len(_sdf)):
-                            for ci in range(1, 4):
+                            for ci in range(1, 5):
                                 ws.cell(row=ri, column=ci).border = _bdr
-                            ws.cell(row=ri, column=3).alignment = _AL(horizontal="center")
+                            ws.cell(row=ri, column=4).alignment = _AL(horizontal="center")
                         _sr = 3 + len(_sdf)
                         ws.cell(row=_sr, column=1, value="합계").font = _Font(bold=True)
                         ws.cell(row=_sr, column=1).fill = _sf
-                        ws.cell(row=_sr, column=3, value=int(_sdf["주문수량"].sum())).font = _Font(bold=True)
-                        ws.cell(row=_sr, column=3).fill = _sf
-                        for ci in range(1, 4):
+                        ws.cell(row=_sr, column=4, value=int(_sdf["주문수량"].sum())).font = _Font(bold=True)
+                        ws.cell(row=_sr, column=4).fill = _sf
+                        for ci in range(1, 5):
                             ws.cell(row=_sr, column=ci).border = _bdr
-                        ws.column_dimensions["A"].width = 55
-                        ws.column_dimensions["B"].width = 14
-                        ws.column_dimensions["C"].width = 10
+                        ws.column_dimensions["A"].width = 16
+                        ws.column_dimensions["B"].width = 55
+                        ws.column_dimensions["C"].width = 14
+                        ws.column_dimensions["D"].width = 10
 
                 _xl_buf.seek(0)
 
@@ -4041,7 +4079,7 @@ elif page == "주문":
                     default=_dist_names_sorted, key="dist_filter",
                 )
                 _filtered_agg = _agg[_agg["거래처"].isin(_dist_filter)] if _dist_filter else _agg
-                _show_agg = _filtered_agg[["거래처", "출판사", "도서명", "주문수량"]].copy()
+                _show_agg = _filtered_agg[["거래처", "ISBN", "출판사", "도서명", "주문수량"]].copy()
 
                 gb = GridOptionsBuilder.from_dataframe(_show_agg)
                 gb.configure_pagination(paginationAutoPageSize=False, paginationPageSize=20)
@@ -4053,108 +4091,211 @@ elif page == "주문":
 
             st.divider()
 
-            # ── 섹션 3: 송장 업로드 ──
-            st.subheader("송장 업로드")
-            st.caption("계정을 선택하여 상품준비중(INSTRUCT) 주문에 운송장을 등록합니다.")
+            # ── 섹션 3: 통합 배송리스트 + 송장 업로드 ──
+            st.subheader("통합 배송리스트 / 송장 업로드")
+            st.caption("전체 계정 상품준비중 주문을 한진택배 형식으로 다운로드 → 송장번호 입력 후 업로드")
 
-            _inv_acct = st.selectbox("계정 선택", account_names, key="inv_acct_select")
-            _inv_acct_row = None
-            if _inv_acct and not accounts_df.empty:
-                _mask = accounts_df["account_name"] == _inv_acct
-                if _mask.any():
-                    _inv_acct_row = accounts_df[_mask].iloc[0]
+            _inv_sub1, _inv_sub2 = st.tabs(["배송리스트 다운로드", "송장 엑셀 업로드"])
 
-            if _inv_acct_row is not None:
-                _inv_account_id = int(_inv_acct_row["id"])
-                _inv_client = create_wing_client(_inv_acct_row)
-
-                # API 실시간 데이터에서 계정 필터
-                _instruct_orders = pd.DataFrame()
-                if not _instruct_all.empty:
-                    _inv_filtered = _instruct_all[_instruct_all["_account_id"] == _inv_account_id].copy()
-                    if not _inv_filtered.empty:
-                        _instruct_orders = _inv_filtered.rename(columns={"_vendor_item_id": "옵션ID"})[
-                            ["묶음배송번호", "주문번호", "옵션ID", "상품명", "수량", "주문일"]
-                        ].copy()
-
-                if _instruct_orders.empty:
-                    st.info(f"[{_inv_acct}] 송장 등록할 주문이 없습니다.")
+            # ── 3-1: 통합 배송리스트 다운로드 (한진택배 형식) ──
+            with _inv_sub1:
+                if _instruct_all.empty:
+                    st.info("상품준비중 주문이 없습니다.")
                 else:
-                    st.dataframe(_instruct_orders, width="stretch", hide_index=True)
+                    _dl_orders = _instruct_all[~_instruct_all["취소"]].copy()
+                    st.metric("전체 계정 상품준비중", f"{len(_dl_orders)}건")
 
-                    _inv_col1, _inv_col2 = st.columns(2)
-                    with _inv_col1:
-                        _delivery_companies = {
-                            "CJGLS": "CJ대한통운", "EPOST": "우체국택배", "HANJIN": "한진택배",
-                            "LOTTE": "롯데택배", "LOGEN": "로젠택배", "KGB": "KGB택배",
-                            "HDEXP": "합동택배",
-                        }
-                        _sel_company = st.selectbox("택배사", list(_delivery_companies.keys()),
-                                                     format_func=lambda x: _delivery_companies[x],
-                                                     key="inv_company")
-                    with _inv_col2:
-                        _inv_number = st.text_input("운송장번호", key="inv_number")
+                    # 쿠팡 DeliveryList 형식 (40컬럼) 생성
+                    _dl_rows = []
+                    for _idx, (_i, _row) in enumerate(_dl_orders.iterrows(), 1):
+                        _dl_rows.append({
+                            "번호": _idx,
+                            "묶음배송번호": int(_row["묶음배송번호"]),
+                            "주문번호": int(_row["주문번호"]),
+                            "택배사": "한진택배",
+                            "운송장번호": "",
+                            "분리배송 Y/N": "분리배송불가",
+                            "분리배송 출고예정일": "",
+                            "주문시 출고예정일": "",
+                            "출고일(발송일)": "",
+                            "주문일": _row.get("주문일", ""),
+                            "등록상품명": _row.get("상품명", ""),
+                            "등록옵션명": _row.get("옵션명", ""),
+                            "노출상품명(옵션명)": f"{_row.get('상품명', '')}, {_row.get('옵션명', '')}",
+                            "노출상품ID": str(_row.get("_seller_product_id", "")),
+                            "옵션ID": str(_row.get("_vendor_item_id", "")),
+                            "최초등록등록상품명/옵션명": "",
+                            "업체상품코드": "",
+                            "바코드": "",
+                            "결제액": int(_row.get("결제금액", 0)),
+                            "배송비구분": "",
+                            "배송비": "",
+                            "도서산간 추가배송비": 0,
+                            "구매수(수량)": int(_row.get("수량", 0)),
+                            "옵션판매가(판매단가)": int(_row.get("결제금액", 0)),
+                            "구매자": "",
+                            "구매자전화번호": "",
+                            "수취인이름": _row.get("수취인", ""),
+                            "수취인전화번호": "",
+                            "우편번호": "",
+                            "수취인 주소": "",
+                            "배송메세지": "",
+                            "상품별 추가메시지": "",
+                            "주문자 추가메시지": "",
+                            "배송완료일": "",
+                            "구매확정일자": "",
+                            "개인통관번호(PCCC)": "",
+                            "통관용수취인전화번호": "",
+                            "기타": "",
+                            "결제위치": "",
+                            "배송유형": "판매자 배송",
+                        })
 
-                    _inv_count = _instruct_orders["묶음배송번호"].nunique()
-                    if st.button(f"송장 등록 ({_inv_count}건)", key="btn_upload_inv"):
-                        if not _inv_number:
-                            st.warning("운송장번호를 입력하세요.")
-                        elif _inv_client:
-                            try:
-                                _inv_data = []
-                                for _, row in _instruct_orders.iterrows():
-                                    _inv_data.append({
-                                        "shipmentBoxId": int(row["묶음배송번호"]),
-                                        "orderId": int(row["주문번호"]),
-                                        "vendorItemId": int(row["옵션ID"]) if pd.notna(row["옵션ID"]) else 0,
-                                        "deliveryCompanyCode": _sel_company,
-                                        "invoiceNumber": _inv_number,
-                                        "splitShipping": False,
-                                        "preSplitShipped": False,
-                                        "estimatedShippingDate": "",
-                                    })
-                                _inv_result = _inv_client.upload_invoice(_inv_data)
+                    _dl_df = pd.DataFrame(_dl_rows)
 
-                                _inv_success_ids = []
-                                _inv_fail_items = []
-                                if isinstance(_inv_result, dict) and "data" in _inv_result:
-                                    _inv_resp = _inv_result["data"]
-                                    _inv_resp_code = _inv_resp.get("responseCode")
-                                    _inv_resp_list = _inv_resp.get("responseList", [])
+                    # 계정별 건수 표시
+                    _acct_counts = _dl_orders.groupby("계정").size().reset_index(name="건수")
+                    st.dataframe(_acct_counts, hide_index=True)
 
-                                    for _ri in _inv_resp_list:
-                                        if _ri.get("succeed"):
-                                            _inv_success_ids.append(_ri["shipmentBoxId"])
-                                        else:
-                                            _inv_fail_items.append(_ri)
+                    # 엑셀 생성
+                    _dl_buf = _io.BytesIO()
+                    with pd.ExcelWriter(_dl_buf, engine="openpyxl") as writer:
+                        _dl_df.to_excel(writer, sheet_name="Delivery", index=False)
+                    _dl_buf.seek(0)
 
-                                    if _inv_resp_code == 0:
-                                        st.success(f"송장 등록 완료: {len(_inv_success_ids)}건")
-                                    elif _inv_resp_code == 1:
-                                        st.warning(f"부분 성공: {len(_inv_success_ids)}건 성공, {len(_inv_fail_items)}건 실패")
-                                        for _fi in _inv_fail_items:
-                                            st.error(f"  {_fi.get('shipmentBoxId')}: [{_fi.get('resultCode')}] {_fi.get('resultMessage', '')}")
-                                    elif _inv_resp_code == 99:
-                                        st.error(f"전체 실패: {_inv_resp.get('responseMessage', '')}")
-                                        for _fi in _inv_fail_items:
-                                            st.error(f"  {_fi.get('shipmentBoxId')}: [{_fi.get('resultCode')}] {_fi.get('resultMessage', '')}")
-                                    else:
-                                        _inv_success_ids = [d["shipmentBoxId"] for d in _inv_data]
-                                        st.success(f"송장 등록 완료: {len(_inv_success_ids)}건")
-                                else:
-                                    _inv_success_ids = [d["shipmentBoxId"] for d in _inv_data]
-                                    st.success(f"송장 등록 완료: {len(_inv_success_ids)}건")
+                    st.download_button(
+                        f"통합 배송리스트 다운로드 ({len(_dl_orders)}건)",
+                        _dl_buf.getvalue(),
+                        file_name=f"DeliveryList({date.today().isoformat()})_통합.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="dl_delivery_list",
+                        type="primary",
+                        use_container_width=True,
+                    )
+                    st.caption("한진택배 프로그램에 업로드 → 송장번호 받은 뒤 → '송장 엑셀 업로드' 탭에서 등록")
 
-                                if _inv_success_ids:
-                                    # 캐시 무효화 → 다음 로드에서 API 재조회
-                                    for _k in list(st.session_state.keys()):
-                                        if _k.startswith("_live_"):
-                                            del st.session_state[_k]
-                                    st.rerun()
-                            except CoupangWingError as e:
-                                st.error(f"API 오류: {e}")
+            # ── 3-2: 송장 엑셀 업로드 (운송장번호 채운 파일) ──
+            with _inv_sub2:
+                st.caption("한진택배에서 송장번호를 받은 엑셀을 업로드하면 각 계정별로 자동 등록됩니다.")
+
+                _inv_file = st.file_uploader("송장 엑셀 파일 (운송장번호 포함)", type=["xlsx", "xls"], key="inv_file_upload")
+
+                if _inv_file is not None:
+                    try:
+                        _inv_df = pd.read_excel(_inv_file)
+
+                        # 컬럼명 확인
+                        _need_cols = ["묶음배송번호", "주문번호", "운송장번호"]
+                        _missing = [c for c in _need_cols if c not in _inv_df.columns]
+                        if _missing:
+                            st.error(f"필수 컬럼 누락: {_missing}")
                         else:
-                            st.error("WING API 클라이언트를 생성할 수 없습니다.")
+                            # 운송장번호가 있는 행만
+                            _inv_filled = _inv_df[_inv_df["운송장번호"].notna() & (_inv_df["운송장번호"] != "")].copy()
+
+                            if _inv_filled.empty:
+                                st.warning("운송장번호가 입력된 행이 없습니다.")
+                            else:
+                                st.success(f"송장번호 입력된 주문: {len(_inv_filled)}건")
+
+                                # 옵션ID 컬럼 확인
+                                _has_option_id = "옵션ID" in _inv_filled.columns
+
+                                # INSTRUCT 주문과 매칭하여 계정 정보 연결
+                                _inv_merged = _inv_filled.copy()
+                                if not _instruct_all.empty:
+                                    _match_cols = _instruct_all[["묶음배송번호", "_account_id", "_vendor_item_id", "주문번호"]].copy()
+                                    _match_cols["묶음배송번호"] = _match_cols["묶음배송번호"].astype(str)
+                                    _inv_merged["묶음배송번호"] = _inv_merged["묶음배송번호"].astype(str)
+                                    _inv_merged["주문번호"] = _inv_merged["주문번호"].astype(str)
+                                    _match_cols["주문번호"] = _match_cols["주문번호"].astype(str)
+
+                                    _inv_merged = _inv_merged.merge(
+                                        _match_cols.drop_duplicates(subset=["묶음배송번호", "주문번호"]),
+                                        on=["묶음배송번호", "주문번호"], how="left",
+                                    )
+
+                                # 계정별로 분리하여 표시
+                                if "_account_id" not in _inv_merged.columns:
+                                    st.error("상품준비중 주문과 매칭할 수 없습니다. 먼저 배송리스트를 다운로드하세요.")
+                                else:
+                                    _matched = _inv_merged[_inv_merged["_account_id"].notna()]
+                                    _unmatched = _inv_merged[_inv_merged["_account_id"].isna()]
+
+                                    if not _unmatched.empty:
+                                        st.warning(f"매칭 안 된 주문: {len(_unmatched)}건 (이미 발송됐거나 취소된 주문)")
+
+                                    if _matched.empty:
+                                        st.info("등록할 송장이 없습니다.")
+                                    else:
+                                        # 계정별 건수
+                                        _acct_id_map = dict(zip(accounts_df["id"].astype(int), accounts_df["account_name"]))
+                                        _matched["계정"] = _matched["_account_id"].astype(int).map(_acct_id_map)
+                                        _acct_summary = _matched.groupby("계정").size().reset_index(name="송장건수")
+                                        st.dataframe(_acct_summary, hide_index=True)
+
+                                        if st.button(f"전체 송장 등록 ({len(_matched)}건)", key="btn_bulk_invoice", type="primary"):
+                                            _total_success = 0
+                                            _total_fail = 0
+
+                                            for _aid, _grp in _matched.groupby("_account_id"):
+                                                _aid = int(_aid)
+                                                _acct_row = accounts_df[accounts_df["id"] == _aid]
+                                                if _acct_row.empty:
+                                                    continue
+                                                _acct_row = _acct_row.iloc[0]
+                                                _client = create_wing_client(_acct_row)
+                                                if not _client:
+                                                    st.error(f"[{_acct_row['account_name']}] API 클라이언트 생성 실패")
+                                                    continue
+
+                                                _inv_data = []
+                                                for _, _r in _grp.iterrows():
+                                                    _vid = int(_r["_vendor_item_id"]) if pd.notna(_r.get("_vendor_item_id")) else 0
+                                                    if not _vid and _has_option_id:
+                                                        _vid = int(_r["옵션ID"]) if pd.notna(_r.get("옵션ID")) else 0
+                                                    _inv_data.append({
+                                                        "shipmentBoxId": int(_r["묶음배송번호"]),
+                                                        "orderId": int(_r["주문번호"]),
+                                                        "vendorItemId": _vid,
+                                                        "deliveryCompanyCode": "HANJIN",
+                                                        "invoiceNumber": str(_r["운송장번호"]).strip(),
+                                                        "splitShipping": False,
+                                                        "preSplitShipped": False,
+                                                        "estimatedShippingDate": "",
+                                                    })
+
+                                                try:
+                                                    _result = _client.upload_invoice(_inv_data)
+                                                    _s_cnt = 0
+                                                    _f_cnt = 0
+                                                    if isinstance(_result, dict) and "data" in _result:
+                                                        for _ri in _result["data"].get("responseList", []):
+                                                            if _ri.get("succeed"):
+                                                                _s_cnt += 1
+                                                            else:
+                                                                _f_cnt += 1
+                                                                st.error(f"  [{_acct_row['account_name']}] {_ri.get('shipmentBoxId')}: {_ri.get('resultMessage', '')}")
+                                                    else:
+                                                        _s_cnt = len(_inv_data)
+                                                    _total_success += _s_cnt
+                                                    _total_fail += _f_cnt
+                                                    st.info(f"[{_acct_row['account_name']}] 성공 {_s_cnt}건" + (f", 실패 {_f_cnt}건" if _f_cnt else ""))
+                                                except Exception as e:
+                                                    _total_fail += len(_inv_data)
+                                                    st.error(f"[{_acct_row['account_name']}] API 오류: {e}")
+
+                                            if _total_success > 0:
+                                                st.success(f"송장 등록 완료: 총 {_total_success}건 성공" + (f", {_total_fail}건 실패" if _total_fail else ""))
+                                                for _k in list(st.session_state.keys()):
+                                                    if _k.startswith("_live_"):
+                                                        del st.session_state[_k]
+                                                st.rerun()
+                                            elif _total_fail > 0:
+                                                st.error(f"전체 실패: {_total_fail}건")
+
+                    except Exception as e:
+                        st.error(f"엑셀 파일 읽기 오류: {e}")
 
     # ══════════════════════════════════════
     # 탭3: 종합
@@ -4373,6 +4514,120 @@ elif page == "주문":
                                 st.error(f"API 오류: {e}")
                         else:
                             st.error("WING API 클라이언트를 생성할 수 없습니다.")
+
+
+    # ══════════════════════════════════════
+    # 탭4: 출고/극동
+    # ══════════════════════════════════════
+    with _ord_tab4:
+            st.caption("당일 출고 완료 주문 → 극동 프로그램용 엑셀 다운로드")
+
+            _gk_col1, _gk_col2 = st.columns([2, 1])
+            with _gk_col1:
+                _gk_date = st.date_input("조회 날짜", value=date.today(), key="gk_date")
+            with _gk_col2:
+                _gk_status = st.selectbox("상태", ["DEPARTURE", "DELIVERING", "FINAL_DELIVERY"], key="gk_status")
+
+            # DB에서 출고 주문 조회
+            _gk_date_str = _gk_date.isoformat()
+            _gk_orders = query_df(f"""
+                SELECT
+                    o.vendor_item_name as 옵션명,
+                    o.seller_product_name as 상품명,
+                    o.shipping_count as 수량,
+                    COALESCE(l.isbn, b.isbn) as ISBN,
+                    b.title as DB도서명,
+                    b.list_price as 정가,
+                    b.author as 저자,
+                    b.year as 출판년도,
+                    pub.name as 출판사,
+                    pub.supply_rate as 공급률
+                FROM orders o
+                LEFT JOIN listings l ON o.listing_id = l.id
+                LEFT JOIN products p ON l.product_id = p.id
+                LEFT JOIN books b ON p.book_id = b.id
+                LEFT JOIN publishers pub ON b.publisher_id = pub.id
+                WHERE o.status = '{_gk_status}'
+                AND DATE(o.ordered_at) = '{_gk_date_str}'
+                ORDER BY pub.name, o.vendor_item_name
+            """)
+
+            if _gk_orders.empty:
+                st.info(f"{_gk_date_str} 에 {_gk_status} 주문이 없습니다. 주문 동기화가 필요할 수 있습니다.")
+            else:
+                # 사은품 필터링
+                from app.constants import is_gift_item as _is_gift2
+                _gk_before = len(_gk_orders)
+                _gk_orders = _gk_orders[~_gk_orders["옵션명"].apply(lambda x: _is_gift2(str(x)))].copy()
+                _gk_gift_cnt = _gk_before - len(_gk_orders)
+                if _gk_gift_cnt > 0:
+                    st.caption(f"사은품/증정품 {_gk_gift_cnt}건 제외됨")
+
+                if _gk_orders.empty:
+                    st.info("사은품 제외 후 주문이 없습니다.")
+                else:
+                    # 도서명 정리
+                    _gk_orders["도서명"] = _gk_orders.apply(
+                        lambda r: str(r["DB도서명"]).strip() if pd.notna(r.get("DB도서명")) and r["DB도서명"] else str(r["옵션명"]).strip(),
+                        axis=1
+                    )
+                    _gk_orders["ISBN_clean"] = _gk_orders["ISBN"].apply(lambda x: str(x).strip() if pd.notna(x) and x else "")
+
+                    # ISBN 기반 그룹핑
+                    _gk_orders["_key"] = _gk_orders.apply(lambda r: r["ISBN_clean"] if r["ISBN_clean"] else r["도서명"], axis=1)
+                    _gk_agg = _gk_orders.groupby("_key").agg(
+                        상품바코드=("ISBN_clean", "first"),
+                        상품명=("도서명", "first"),
+                        정가=("정가", "first"),
+                        수량=("수량", "sum"),
+                        공급률=("공급률", "first"),
+                        출판사=("출판사", "first"),
+                        저자=("저자", "first"),
+                        출판년도=("출판년도", "first"),
+                    ).reset_index(drop=True)
+
+                    # KPI
+                    _gk_k1, _gk_k2 = st.columns(2)
+                    _gk_k1.metric("출고 품목", f"{len(_gk_agg)}종")
+                    _gk_k2.metric("출고 수량", f"{int(_gk_agg['수량'].sum())}권")
+
+                    # 테이블 표시
+                    _gk_show = _gk_agg[["상품바코드", "상품명", "수량", "출판사"]].copy()
+                    st.dataframe(_gk_show, hide_index=True, use_container_width=True)
+
+                    # 극동 형식 엑셀 생성
+                    _gk_result = pd.DataFrame()
+                    _gk_result["NO."] = range(1, len(_gk_agg) + 1)
+                    _gk_result["상품바코드"] = _gk_agg["상품바코드"].values
+                    _gk_result["상품명"] = _gk_agg["상품명"].values
+                    _gk_result["#"] = ""
+                    _gk_result["정 가"] = _gk_agg["정가"].apply(lambda x: int(x) if pd.notna(x) else 0).values
+                    _gk_result["수 량"] = _gk_agg["수량"].values
+                    _gk_result["%"] = _gk_agg["공급률"].apply(lambda x: f"{x*100:.0f}" if pd.notna(x) and x else "").values
+                    _gk_result["단 가"] = _gk_agg.apply(
+                        lambda r: int(r["정가"] * r["공급률"]) if pd.notna(r["공급률"]) and r["공급률"] and pd.notna(r["정가"]) else (int(r["정가"]) if pd.notna(r["정가"]) else 0),
+                        axis=1
+                    ).values
+                    _gk_result["금 액"] = (_gk_result["단 가"] * _gk_result["수 량"]).values
+                    _gk_result[""] = ""
+                    _gk_result["출판사"] = _gk_agg["출판사"].apply(lambda x: str(x) if pd.notna(x) else "").values
+                    _gk_result["저자"] = _gk_agg["저자"].apply(lambda x: str(x) if pd.notna(x) else "").values
+                    _gk_result["출판년도"] = _gk_agg["출판년도"].apply(lambda x: str(int(x)) if pd.notna(x) else "").values
+
+                    _gk_buf = _io.BytesIO()
+                    with pd.ExcelWriter(_gk_buf, engine="openpyxl") as writer:
+                        _gk_result.to_excel(writer, sheet_name="극동", index=False)
+                    _gk_buf.seek(0)
+
+                    st.download_button(
+                        f"극동 엑셀 다운로드 ({len(_gk_agg)}종 / {int(_gk_agg['수량'].sum())}권)",
+                        _gk_buf.getvalue(),
+                        file_name=f"극동_{_gk_date.strftime('%m%d')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="gk_xlsx_dl",
+                        type="primary",
+                        use_container_width=True,
+                    )
 
 
 # ═══════════════════════════════════════
