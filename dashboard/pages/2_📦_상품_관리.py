@@ -129,7 +129,7 @@ try:
                 '순마진': product.net_margin,
                 '배송정책': product.shipping_policy,
                 '상태': product.status,
-                '출판사': book.publisher_name if book else '-',
+                '출판사': (book.publisher.name if book and book.publisher else '-'),
                 '제외사유': product.exclude_reason or '',
             })
 

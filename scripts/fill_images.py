@@ -1,7 +1,7 @@
-"""WING API 상세 조회로 listings에 매칭되는 books 이미지 채우기
-listings 자체에는 이미지 컬럼이 없으므로,
-coupang_product_id로 상세 조회 → 이미지 URL 추출 → books 테이블에 저장
-(ISBN이나 제목으로 매칭되는 book이 없으면 새로 books에 INSERT)
+"""WING API 상세 조회로 listings의 ISBN 보강 (비활성)
+image_url, is_processed, publisher_name 컬럼이 books에서 삭제되어
+이미지 관련 기능은 비활성화됨.
+ISBN 추출 및 listings.isbn 업데이트 기능만 유효.
 """
 import sys
 import os
@@ -123,26 +123,18 @@ with engine.connect() as conn:
             # books 테이블에 매칭되는 레코드 찾기
             book = None
             if final_isbn:
-                book = conn.execute(text('SELECT id, image_url FROM books WHERE isbn=:isbn'), {'isbn': final_isbn}).first()
+                book = conn.execute(text('SELECT id FROM books WHERE isbn=:isbn'), {'isbn': final_isbn}).first()
             if not book and pname:
-                book = conn.execute(text("SELECT id, image_url FROM books WHERE title=:title"), {'title': pname}).first()
+                book = conn.execute(text("SELECT id FROM books WHERE title=:title"), {'title': pname}).first()
 
             if book:
-                # 이미지 업데이트
-                bid, existing_img = book
-                if img_url and not existing_img:
-                    conn.execute(text('UPDATE books SET image_url=:url WHERE id=:id'), {'url': img_url, 'id': bid})
-                    updated_img += 1
+                # image_url 컬럼 삭제됨 — 스킵
+                bid = book[0]
+                pass
             else:
-                # books에 없으면 새로 INSERT (이미지 포함)
-                if final_isbn and img_url:
-                    dup = conn.execute(text('SELECT 1 FROM books WHERE isbn=:isbn'), {'isbn': final_isbn}).first()
-                    if not dup:
-                        conn.execute(text('''
-                            INSERT INTO books (isbn, title, list_price, image_url, is_processed, publisher_name)
-                            VALUES (:isbn, :title, :price, :img, 1, '')
-                        '''), {'isbn': final_isbn, 'title': pname or '', 'price': op or 0, 'img': img_url})
-                        new_books += 1
+                # books에 없으면 스킵 (image_url, is_processed, publisher_name 컬럼 삭제됨)
+                # 새 book은 크롤러를 통해 정상 경로로 등록해야 함
+                pass
 
             if (i + 1) % 200 == 0:
                 conn.commit()
@@ -153,9 +145,9 @@ with engine.connect() as conn:
             failed += 1
 
     conn.commit()
-    print(f'\n완료: isbn업데이트={updated_isbn}, 이미지업데이트={updated_img}, 신규book={new_books}, 실패={failed}, 스킵={skipped}')
+    print(f'\n완료: isbn업데이트={updated_isbn}, 실패={failed}, 스킵={skipped}')
+    print('참고: image_url 컬럼 삭제됨 — 이미지 관련 기능 비활성')
 
     # 최종 통계
-    total_img = conn.execute(text("SELECT COUNT(*) FROM books WHERE image_url IS NOT NULL AND image_url != ''")).scalar()
     total_books = conn.execute(text("SELECT COUNT(*) FROM books")).scalar()
-    print(f'books 이미지: {total_img}/{total_books}')
+    print(f'books 총 수: {total_books}')

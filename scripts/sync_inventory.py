@@ -168,7 +168,7 @@ class InventorySync:
                 listing_row = None
                 if seller_product_id:
                     listing_row = conn.execute(text(
-                        "SELECT id, sale_price, coupang_sale_price, stock_quantity, "
+                        "SELECT id, sale_price, stock_quantity, "
                         "vendor_item_id, coupang_status, product_id "
                         "FROM listings WHERE account_id = :aid AND coupang_product_id = :cpid LIMIT 1"
                     ), {"aid": account_id, "cpid": seller_product_id}).mappings().first()
@@ -176,9 +176,9 @@ class InventorySync:
                 if listing_row:
                     matched_products.append((seller_product_id, product_name, coupang_status, dict(listing_row)))
 
-            # VID 있는/없는 분리
-            need_detail = [m for m in matched_products if not (m[3].get("vendor_item_id") or "")]
-            have_vid = [m for m in matched_products if (m[3].get("vendor_item_id") or "")]
+            # VID 있는/없는 분리 (BigInteger — falsy=0/None 체크)
+            need_detail = [m for m in matched_products if not m[3].get("vendor_item_id")]
+            have_vid = [m for m in matched_products if m[3].get("vendor_item_id")]
 
             logger.info(
                 f"  [{account_name}] DB 매칭: {len(matched_products)}/{len(products)}개 "
@@ -193,15 +193,14 @@ class InventorySync:
                 result["total_checked"] += 1
 
                 listing_id = listing["id"]
-                db_target_price = listing["sale_price"] or 0
-                db_coupang_price = listing["coupang_sale_price"] or 0
+                db_live_price = listing["sale_price"] or 0
                 db_stock = listing["stock_quantity"] if listing["stock_quantity"] is not None else default_stock
-                db_vid = listing["vendor_item_id"] or ""
+                db_vid = listing["vendor_item_id"]  # BigInteger or None
                 db_status = listing["coupang_status"] or ""
                 product_id = listing["product_id"]
 
                 vid = db_vid
-                live_price = db_coupang_price
+                live_price = db_live_price
 
                 # VID 없으면 상세 조회 필수
                 if not db_vid:
@@ -211,7 +210,8 @@ class InventorySync:
                         items = detail_data.get("items", [])
                         if items:
                             item = items[0]
-                            vid = str(item.get("vendorItemId", ""))
+                            raw_vid = item.get("vendorItemId")
+                            vid = int(raw_vid) if raw_vid else None
                             live_price = int(item.get("salePrice", 0) or 0)
                     except CoupangWingError as e:
                         logger.warning(f"  상세 조회 실패: {product_name[:30]} — {e}")
@@ -222,8 +222,8 @@ class InventorySync:
                         logger.info(f"  [{account_name}] 상세 조회 진행: {idx}/{len(need_detail)}")
                         conn.commit()  # 중간 커밋
 
-                # 목표가격 결정: products.sale_price → listing.sale_price (폴백)
-                target_price = db_target_price
+                # 목표가격 결정: products.sale_price
+                target_price = 0
                 if product_id:
                     prod_row = conn.execute(text(
                         "SELECT sale_price FROM products WHERE id = :pid LIMIT 1"
@@ -231,23 +231,23 @@ class InventorySync:
                     if prod_row and prod_row["sale_price"]:
                         target_price = prod_row["sale_price"]
 
-                # vendor_item_id 백필
+                # vendor_item_id 백필 (BigInteger)
                 if vid and vid != db_vid:
                     conn.execute(text(
                         "UPDATE listings SET vendor_item_id = :vid WHERE id = :lid"
-                    ), {"vid": vid, "lid": listing_id})
+                    ), {"vid": int(vid), "lid": listing_id})
                     result["vendor_id_backfilled"] += 1
 
-                # coupang_sale_price 업데이트 (라이브 가격 기록)
-                if live_price and live_price != db_coupang_price:
+                # sale_price 업데이트 (라이브 가격 기록)
+                if live_price and live_price != db_live_price:
                     conn.execute(text(
-                        "UPDATE listings SET coupang_sale_price = :price WHERE id = :lid"
+                        "UPDATE listings SET sale_price = :price WHERE id = :lid"
                     ), {"price": live_price, "lid": listing_id})
 
                 # 쿠팡 상태 변경 반영
                 if coupang_status != db_status:
                     conn.execute(text(
-                        "UPDATE listings SET coupang_status = :st, last_checked_at = :now WHERE id = :lid"
+                        "UPDATE listings SET coupang_status = :st, synced_at = :now WHERE id = :lid"
                     ), {"st": coupang_status, "lid": listing_id, "now": datetime.utcnow().isoformat()})
                     result["status_updated"] += 1
                     logger.info(f"  상태 변경: listing#{listing_id} {db_status} → {coupang_status}")
@@ -264,7 +264,7 @@ class InventorySync:
                     continue
 
                 # vendor_item_id 없으면 API 호출 불가
-                effective_vid = vid or db_vid
+                effective_vid = vid if vid else db_vid
                 if not effective_vid:
                     logger.warning(f"  vendor_item_id 없음: listing#{listing_id} ({product_name[:30]})")
                     continue
@@ -301,8 +301,8 @@ class InventorySync:
 
                     # 성공 - DB 업데이트
                     conn.execute(text(
-                        "UPDATE listings SET coupang_sale_price = :price, stock_quantity = :qty, "
-                        "last_checked_at = :now WHERE id = :lid"
+                        "UPDATE listings SET sale_price = :price, stock_quantity = :qty, "
+                        "synced_at = :now WHERE id = :lid"
                     ), {"price": new_price, "qty": new_qty, "lid": listing_id,
                         "now": datetime.utcnow().isoformat()})
 

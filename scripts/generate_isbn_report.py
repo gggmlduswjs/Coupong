@@ -55,16 +55,22 @@ def generate_isbn_report(db_path: str = 'coupang_auto_backup.db'):
     print()
 
     # ============================================================================
-    # 2. 상품 유형별 통계
+    # 2. 상품 유형별 통계 (product_id/bundle_id 기반)
     # ============================================================================
     cursor.execute("""
-        SELECT product_type, COUNT(*) as cnt
+        SELECT
+            CASE
+                WHEN bundle_id IS NOT NULL THEN 'bundle'
+                WHEN product_id IS NOT NULL THEN 'single'
+                ELSE 'unknown'
+            END AS product_type,
+            COUNT(*) as cnt
         FROM listings
         GROUP BY product_type
     """)
     type_stats = cursor.fetchall()
 
-    print("📦 상품 유형별 통계")
+    print("상품 유형별 통계")
     print("-" * 80)
     for row in type_stats:
         ptype = row[0] or 'unknown'
@@ -72,12 +78,14 @@ def generate_isbn_report(db_path: str = 'coupang_auto_backup.db'):
         print(f"{ptype}: {count:,}개 ({count/total_listings*100:.1f}%)")
 
         # 유형별 ISBN 보유율
-        cursor.execute("""
-            SELECT COUNT(*) FROM listings
-            WHERE product_type = ? AND isbn IS NOT NULL AND isbn != ''
-        """, (row[0],))
+        if ptype == 'bundle':
+            cursor.execute("SELECT COUNT(*) FROM listings WHERE bundle_id IS NOT NULL AND isbn IS NOT NULL AND isbn != ''")
+        elif ptype == 'single':
+            cursor.execute("SELECT COUNT(*) FROM listings WHERE product_id IS NOT NULL AND isbn IS NOT NULL AND isbn != ''")
+        else:
+            cursor.execute("SELECT COUNT(*) FROM listings WHERE product_id IS NULL AND bundle_id IS NULL AND isbn IS NOT NULL AND isbn != ''")
         with_isbn_type = cursor.fetchone()[0]
-        print(f"  └─ ISBN 보유: {with_isbn_type:,}개 ({with_isbn_type/count*100:.1f}%)")
+        print(f"  - ISBN 보유: {with_isbn_type:,}개 ({with_isbn_type/count*100:.1f}%)")
     print()
 
     # ============================================================================

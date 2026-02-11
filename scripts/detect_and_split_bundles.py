@@ -138,9 +138,10 @@ def search_isbn_from_books(component: str, conn) -> Optional[str]:
         # 1단계: 키워드 + 퍼블리셔 매칭
         if publisher:
             cursor.execute("""
-                SELECT DISTINCT isbn
-                FROM books
-                WHERE LOWER(title) LIKE ? AND LOWER(publisher_name) LIKE ?
+                SELECT DISTINCT b.isbn
+                FROM books b
+                LEFT JOIN publishers pub ON b.publisher_id = pub.id
+                WHERE LOWER(b.title) LIKE ? AND LOWER(pub.name) LIKE ?
                 LIMIT 1
             """, (f'%{keywords.lower()[:40]}%', f'%{publisher.lower()}%'))
 

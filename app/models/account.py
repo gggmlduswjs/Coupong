@@ -13,10 +13,7 @@ class Account(Base):
     id = Column(Integer, primary_key=True, index=True)
     account_name = Column(String(50), unique=True, nullable=False, index=True)
     email = Column(String(100), nullable=False)
-    password_encrypted = Column(String(500), nullable=False)
-    session_file = Column(String(255), nullable=True)
     is_active = Column(Boolean, default=True)
-    last_login_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

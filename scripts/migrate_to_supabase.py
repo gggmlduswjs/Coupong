@@ -95,14 +95,14 @@ def get_table_order():
 
 # Supabase VARCHAR(20)/(10) 컬럼: 전송 시 이 길이로 자름 (22001 방지, ALTER 없이 통과)
 SHORT_VARCHAR_MAX = {
-    "listings": {"product_type": 20, "coupang_status": 20, "shipping_policy": 20, "display_category_code": 20, "delivery_charge_type": 20, "winner_status": 20, "upload_method": 20, "isbn": 100},
+    "listings": {"coupang_status": 20, "display_category_code": 20, "delivery_charge_type": 20, "isbn": 100},
     "orders": {"shipment_type": 20, "receiver_post_code": 10},
     "return_requests": {"receipt_type": 20, "return_delivery_type": 20, "fault_by_type": 20, "requester_zip_code": 10},
     "revenue_history": {"sale_type": 20},
 }
 # listings: 위 목록 외 문자열도 20자로 자름 (Supabase VARCHAR(20) 누락 대비). 아래 컬럼은 자르지 않음.
 LISTINGS_STRING_MAX = 20
-LISTINGS_LONG_COLUMNS = {"product_name", "raw_json", "error_message", "bundle_key", "brand", "coupang_product_id", "vendor_item_id", "item_id"}
+LISTINGS_LONG_COLUMNS = {"product_name", "raw_json", "brand", "coupang_product_id", "vendor_item_id"}
 # 23503 (listing_id FK 없음) 시 listing_id=null 로 재시도할 테이블
 LISTING_FK_TABLES = {"orders", "revenue_history"}
 # orders: 21억 초과 ID → JSON에서 숫자로 보내야 함 (문자열이면 22003)

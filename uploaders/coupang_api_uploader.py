@@ -176,7 +176,6 @@ class CoupangAPIUploader:
         sale_price = product_data.get("sale_price", 0)
         image_url = product_data.get("main_image_url", "")
         description = product_data.get("description", "상세페이지 참조")
-        shipping_policy = product_data.get("shipping_policy", "free")
 
         # API 문자열 길이 제한 적용
         seller_product_name = title[:100]

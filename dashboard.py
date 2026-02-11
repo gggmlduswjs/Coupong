@@ -44,7 +44,7 @@ if selected_account_name and not accounts_df.empty:
         selected_account = accounts_df[mask].iloc[0]
 
 st.sidebar.divider()
-page = st.sidebar.radio("메뉴", ["주문/배송", "상품", "분석", "순이익", "광고", "반품"])
+page = st.sidebar.radio("메뉴", ["주문/배송", "상품", "매출/정산", "광고", "반품"])
 
 if selected_account is not None:
     st.sidebar.divider()
@@ -63,11 +63,7 @@ elif page == "상품":
     from app.pages.products import render
     render(selected_account, accounts_df, account_names)
 
-elif page == "분석":
-    from app.pages.analytics import render
-    render(selected_account, accounts_df, account_names)
-
-elif page == "순이익":
+elif page == "매출/정산":
     from app.pages.profit import render
     render(selected_account, accounts_df, account_names)
 

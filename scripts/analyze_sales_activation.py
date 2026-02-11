@@ -417,7 +417,7 @@ class SalesActivationAnalyzer:
 
         rows = self._q("""
             SELECT a.account_name,
-                   b.publisher_name,
+                   pub.name AS publisher_name,
                    COUNT(*) AS listing_cnt,
                    AVG(p.supply_rate) AS avg_supply_rate,
                    AVG(p.net_margin) AS avg_margin
@@ -425,8 +425,9 @@ class SalesActivationAnalyzer:
             JOIN accounts a ON a.id = l.account_id
             JOIN products p ON p.id = l.product_id
             JOIN books b ON b.id = p.book_id
-            WHERE l.coupang_status = 'active' AND l.product_type = 'single'
-            GROUP BY a.account_name, b.publisher_name
+            LEFT JOIN publishers pub ON pub.id = b.publisher_id
+            WHERE l.coupang_status = 'active' AND l.product_id IS NOT NULL
+            GROUP BY a.account_name, pub.name
             ORDER BY a.account_name, listing_cnt DESC
         """)
 
@@ -471,7 +472,7 @@ class SalesActivationAnalyzer:
         # 매출 발생 출판사 vs 미발생 출판사
         self._print("\n  [매출 발생 출판사 TOP 10]")
         pub_revenue = self._q("""
-            SELECT b.publisher_name,
+            SELECT pub.name AS publisher_name,
                    COUNT(DISTINCT l.id) AS listing_cnt,
                    SUM(rh.sale_amount) AS total_revenue,
                    SUM(rh.quantity) AS total_qty,
@@ -480,8 +481,9 @@ class SalesActivationAnalyzer:
             JOIN listings l ON l.id = rh.listing_id
             JOIN products p ON p.id = l.product_id
             JOIN books b ON b.id = p.book_id
+            LEFT JOIN publishers pub ON pub.id = b.publisher_id
             WHERE rh.sale_type = 'SALE' AND rh.sale_date >= :start
-            GROUP BY b.publisher_name
+            GROUP BY pub.name
             ORDER BY total_revenue DESC
             LIMIT 10
         """, {"start": str(self.start_date)})

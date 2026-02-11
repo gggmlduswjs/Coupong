@@ -79,10 +79,11 @@ def find_matching_books(product_name, conn):
     # 1단계: 전체 키워드 + 출판사 매칭
     if publisher:
         query = text("""
-            SELECT DISTINCT isbn, title, normalized_title, publisher_name
-            FROM books
-            WHERE LOWER(title) LIKE :keyword
-            AND LOWER(publisher_name) LIKE :pub
+            SELECT DISTINCT b.isbn, b.title, b.normalized_title, pub.name as publisher_name
+            FROM books b
+            LEFT JOIN publishers pub ON b.publisher_id = pub.id
+            WHERE LOWER(b.title) LIKE :keyword
+            AND LOWER(pub.name) LIKE :pub
             LIMIT 5
         """)
         results = conn.execute(query, {
@@ -93,9 +94,10 @@ def find_matching_books(product_name, conn):
     # 2단계: 전체 키워드만으로 매칭
     if not results:
         query = text("""
-            SELECT DISTINCT isbn, title, normalized_title, publisher_name
-            FROM books
-            WHERE LOWER(title) LIKE :keyword
+            SELECT DISTINCT b.isbn, b.title, b.normalized_title, pub.name as publisher_name
+            FROM books b
+            LEFT JOIN publishers pub ON b.publisher_id = pub.id
+            WHERE LOWER(b.title) LIKE :keyword
             LIMIT 5
         """)
         results = conn.execute(query, {

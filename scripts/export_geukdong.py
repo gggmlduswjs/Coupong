@@ -61,7 +61,6 @@ def export_geukdong(target_date: str = None, status: str = "DEPARTURE",
             COALESCE(l.isbn, b.isbn) as ISBN,
             b.title as DB도서명,
             b.list_price as 정가,
-            b.author as 저자,
             b.year as 출판년도,
             pub.name as 출판사,
             pub.supply_rate as 공급률

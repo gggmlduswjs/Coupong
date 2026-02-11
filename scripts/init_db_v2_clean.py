@@ -1,184 +1,170 @@
 # -*- coding: utf-8 -*-
-"""Database V2 Initialization Script"""
+"""
+Database V3 Clean Initialization Script
+========================================
+drop_all() → create_all() — 전체 테이블 재생성
+
+주의: 기존 데이터가 모두 삭제됩니다!
+"""
 import sys
 from pathlib import Path
 
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
+from dotenv import load_dotenv
+load_dotenv()
+
 from app.database import engine, SessionLocal, Base
-from app.models import Publisher, Book, Product, BundleSKU, Listing, Account, Sales, AnalysisResult
+
+# 모든 모델 import (Base.metadata에 등록)
+from app.models import (
+    Account, Publisher, Book, Product, BundleSKU, BundleItem,
+    Listing, AnalysisResult,
+    RevenueHistory, SettlementHistory, AdSpend, AdPerformance,
+    Order, ReturnRequest,
+)
 
 
-def init_database():
-    """Create database tables"""
-    print("\n" + "="*60)
-    print("Database V2 Initialization")
-    print("="*60)
+def init_database(drop_first: bool = False):
+    """테이블 생성 (drop_first=True면 기존 테이블 삭제 후 재생성)"""
+    from sqlalchemy import text
 
-    print("\n1. Creating tables...")
+    print("\n" + "=" * 60)
+    print("  Database V3 Clean Initialization")
+    print("=" * 60)
 
-    # Create all tables
+    if drop_first:
+        print("\n[1/2] 기존 테이블 삭제...")
+        # PostgreSQL: CASCADE로 모든 의존성 포함 삭제
+        with engine.connect() as conn:
+            # 현재 존재하는 모든 테이블 조회
+            rows = conn.execute(text(
+                "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"
+            )).fetchall()
+            table_names = [r[0] for r in rows]
+            if table_names:
+                tables_str = ", ".join(table_names)
+                conn.execute(text(f"DROP TABLE IF EXISTS {tables_str} CASCADE"))
+                conn.commit()
+                print(f"   [OK] {len(table_names)}개 테이블 CASCADE 삭제 완료")
+            else:
+                print("   [OK] 삭제할 테이블 없음")
+
+    print(f"\n[{'2/2' if drop_first else '1/1'}] 테이블 생성...")
     Base.metadata.create_all(bind=engine)
+    print("   [OK] 테이블 생성 완료")
 
-    print("   [OK] Tables created successfully")
-    print("      - accounts")
-    print("      - publishers [NEW]")
-    print("      - books [NEW] (formerly kyobo_products)")
-    print("      - products [UPDATED]")
-    print("      - bundle_skus [NEW]")
-    print("      - listings [UPDATED]")
-    print("      - sales")
-    print("      - analysis_results")
-    print("      - tasks")
+    tables = [
+        "accounts", "publishers", "books", "products",
+        "bundle_skus", "bundle_items", "listings",
+        "analysis_results", "revenue_history", "settlement_history",
+        "ad_spends", "ad_performances", "orders", "return_requests",
+    ]
+    for t in tables:
+        print(f"      - {t}")
 
 
 def init_publishers():
-    """Initialize publisher data"""
-    print("\n2. Initializing publisher data...")
+    """출판사 시딩"""
+    from config.publishers import PUBLISHERS
+    from app.models import Publisher
+
+    print("\n[출판사 시딩]")
 
     db = SessionLocal()
-
     try:
-        # Check existing data
-        existing_count = db.query(Publisher).count()
-        if existing_count > 0:
-            print(f"   [WARNING] {existing_count} publishers already exist.")
-            overwrite = input("   Delete and re-insert? (y/n): ").strip().lower()
-            if overwrite == 'y':
-                db.query(Publisher).delete()
-                db.commit()
-                print("   [OK] Existing data deleted")
-            else:
-                print("   Skipped")
-                return
+        existing = db.query(Publisher).count()
+        if existing > 0:
+            print(f"   이미 {existing}개 출판사 존재 → 건너뜀")
+            return
 
-        # Publisher data (24 publishers)
-        publishers_data = [
-            # Margin rate 40% (Supply rate 60%)
-            ("marinbooks", 40, 9000, 0.60),
-            ("academysoft", 40, 9000, 0.60),
-            ("lexmedia", 40, 9000, 0.60),
-            ("harambooks", 40, 9000, 0.60),
-
-            # Margin rate 55% (Supply rate 45%)
-            ("crown", 55, 14400, 0.45),
-            ("youngjin", 55, 14400, 0.45),
-
-            # Margin rate 60% (Supply rate 40%)
-            ("efuture", 60, 18000, 0.40),
-            ("socialreview", 60, 18000, 0.40),
-            ("gilbut", 60, 18000, 0.40),
-            ("artio", 60, 18000, 0.40),
-            ("easyspub", 60, 18000, 0.40),
-
-            # Margin rate 65% (Supply rate 35%)
-            ("gaennyeom", 65, 23900, 0.35),
-            ("etoos", 65, 23900, 0.35),
-            ("visang", 65, 23900, 0.35),
-            ("neungyule", 65, 23900, 0.35),
-            ("seetalk", 65, 23900, 0.35),
-            ("jihaksa", 65, 23900, 0.35),
-            ("sukyung", 65, 23900, 0.35),
-            ("soltibooks", 65, 23900, 0.35),
-            ("matheytung", 65, 23900, 0.35),
-            ("hanbit", 65, 23900, 0.35),
-
-            # Margin rate 67% (Supply rate 33%)
-            ("donga", 67, 27600, 0.33),
-
-            # Margin rate 70% (Supply rate 30%)
-            ("goodbook", 70, 35800, 0.30),
-
-            # Margin rate 73% (Supply rate 27%)
-            ("EBS", 73, 50800, 0.27),
-            ("kbs_edu", 73, 50800, 0.27),
-        ]
-
-        for name, margin_rate, min_free_shipping, supply_rate in publishers_data:
+        for pub_data in PUBLISHERS:
+            margin = pub_data.get("margin_rate") or pub_data.get("margin")
+            supply_rate = pub_data.get("supply_rate") or round((100 - margin) / 100, 2)
             publisher = Publisher(
-                name=name,
-                margin_rate=margin_rate,
-                min_free_shipping=min_free_shipping,
+                name=pub_data["name"],
+                margin_rate=margin,
+                min_free_shipping=pub_data.get("min_free_shipping", 0),
                 supply_rate=supply_rate,
-                is_active=True
+                is_active=True,
             )
             db.add(publisher)
-            print(f"   [OK] {name} (margin {margin_rate}%, supply {int(supply_rate*100)}%)")
+            print(f"   + {pub_data['name']} (매입률 {margin}%)")
 
         db.commit()
-
-        print(f"\n   [OK] {len(publishers_data)} publishers registered")
+        print(f"   [OK] {len(PUBLISHERS)}개 출판사 등록")
 
     except Exception as e:
-        print(f"\n   [ERROR] {e}")
+        print(f"   [ERROR] {e}")
         db.rollback()
-
     finally:
         db.close()
 
 
-def test_publisher_calculations():
-    """Test publisher margin calculations"""
-    print("\n3. Testing publisher margin calculations...")
+def verify_schema():
+    """스키마 검증"""
+    from sqlalchemy import inspect
 
-    db = SessionLocal()
+    print("\n[스키마 검증]")
+    inspector = inspect(engine)
+    tables = inspector.get_table_names()
+    print(f"   테이블 수: {len(tables)}")
 
-    try:
-        # Test cases
-        test_cases = [
-            ("gaennyeom", 15000, "65% publisher"),
-            ("gilbut", 30000, "60% publisher"),
-            ("EBS", 10000, "73% publisher (bundle required)"),
-        ]
+    # 핵심 테이블 확인
+    required = [
+        "accounts", "publishers", "books", "products",
+        "bundle_skus", "bundle_items", "listings",
+    ]
+    for t in required:
+        if t in tables:
+            cols = [c["name"] for c in inspector.get_columns(t)]
+            print(f"   [OK] {t} ({len(cols)} 컬럼)")
+        else:
+            print(f"   [FAIL] {t} — 테이블 없음!")
 
-        for pub_name, list_price, desc in test_cases:
-            publisher = db.query(Publisher).filter(Publisher.name == pub_name).first()
+    # Listing 핵심 컬럼 확인
+    listing_cols = {c["name"] for c in inspector.get_columns("listings")}
+    must_have = {"coupang_product_id", "vendor_item_id", "product_id", "bundle_id", "isbn", "synced_at"}
+    must_not = {"product_type", "bundle_key", "coupang_sale_price", "winner_status", "upload_method", "last_checked_at"}
 
-            if publisher:
-                margin_info = publisher.calculate_margin(list_price)
-                policy = publisher.determine_shipping_policy(list_price)
+    for col in must_have:
+        status = "OK" if col in listing_cols else "MISSING"
+        print(f"   listings.{col}: [{status}]")
 
-                print(f"\n   [{desc}] {pub_name} - List price {list_price:,} KRW")
-                print(f"      Sale price: {margin_info['sale_price']:,} KRW")
-                print(f"      Supply cost: {margin_info['supply_cost']:,} KRW")
-                print(f"      Coupang fee: {margin_info['coupang_fee']:,} KRW")
-                print(f"      Margin per unit: {margin_info['margin_per_unit']:,} KRW")
-                print(f"      Net margin: {margin_info['net_margin']:,} KRW")
-                print(f"      Shipping policy: {policy}")
-
-        print("\n   [OK] Margin calculations working correctly")
-
-    except Exception as e:
-        print(f"\n   [ERROR] {e}")
-
-    finally:
-        db.close()
+    for col in must_not:
+        if col in listing_cols:
+            print(f"   listings.{col}: [WARN] 삭제되지 않은 컬럼!")
 
 
 def main():
-    """Main function"""
-    print("\n" + "="*60)
-    print("Database V2 Schema Initialization")
-    print("="*60)
+    import argparse
+    parser = argparse.ArgumentParser(description="DB V3 초기화")
+    parser.add_argument("--drop", action="store_true", help="기존 테이블 삭제 후 재생성")
+    parser.add_argument("--seed", action="store_true", help="출판사 시딩")
+    parser.add_argument("--verify", action="store_true", help="스키마 검증만")
+    args = parser.parse_args()
 
-    # 1. Create tables
-    init_database()
+    if args.verify:
+        verify_schema()
+        return
 
-    # 2. Initialize publisher data
-    init_publishers()
+    if args.drop:
+        confirm = input("\n[WARNING] 모든 데이터가 삭제됩니다. 계속하시겠습니까? (yes/no): ").strip()
+        if confirm != "yes":
+            print("취소됨")
+            return
 
-    # 3. Test
-    test_publisher_calculations()
+    init_database(drop_first=args.drop)
 
-    print("\n" + "="*60)
-    print("Initialization Complete!")
-    print("="*60)
+    if args.seed:
+        init_publishers()
 
-    print("\nNext steps:")
-    print("1. python scripts/register_accounts.py (Register accounts)")
-    print("2. python scripts/auto_search_publishers.py (Search books)")
-    print()
+    verify_schema()
+
+    print("\n" + "=" * 60)
+    print("  초기화 완료!")
+    print("=" * 60)
 
 
 if __name__ == "__main__":

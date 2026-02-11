@@ -1,10 +1,10 @@
 """
-상품설명 일괄 채우기
-====================
-판매중(active) 리스팅에 연결된 도서 중 description이 없는 것을
-1차: 알라딘 API, 2차: 템플릿 자동 생성으로 채움
+상품설명 일괄 채우기 (비활성)
+==============================
+Book.description 컬럼이 삭제되어 이 스크립트는 더 이상 사용되지 않습니다.
+상품 설명은 WING API 등록 시 "상세페이지 참조"로 고정됩니다.
 
-사용법:
+이전 사용법:
     python scripts/fill_descriptions.py                    # 알라딘 API
     python scripts/fill_descriptions.py --generate         # 템플릿 자동 생성 (API 없는 것)
     python scripts/fill_descriptions.py --limit 10         # 10개만 테스트
@@ -119,123 +119,17 @@ def generate_description(title, author, publisher, list_price, category_type):
 
 
 def fill_from_aladin(limit=0, dry_run=False):
-    """1차: 알라딘 API로 설명 채우기"""
-    ttb_key = os.getenv("ALADIN_TTB_KEY")
-    if not ttb_key:
-        logger.error("ALADIN_TTB_KEY가 .env에 없습니다.")
-        return
-
-    crawler = AladinAPICrawler(ttb_key=ttb_key)
-
-    with engine.connect() as conn:
-        query = """
-            SELECT DISTINCT b.id, b.isbn, b.title
-            FROM listings l
-            JOIN products p ON l.product_id = p.id
-            JOIN books b ON p.book_id = b.id
-            WHERE l.coupang_status = 'active'
-            AND (b.description IS NULL OR b.description = '')
-            AND b.isbn IS NOT NULL AND b.isbn != ''
-            ORDER BY b.id
-        """
-        if limit > 0:
-            query += f" LIMIT {limit}"
-
-        rows = conn.execute(text(query)).fetchall()
-        total = len(rows)
-
-        if total == 0:
-            logger.info("채울 도서가 없습니다.")
-            return
-
-        logger.info(f"설명 누락 도서: {total}권 (알라딘 API 조회 시작)")
-        if dry_run:
-            logger.info("** DRY RUN 모드 **")
-
-        filled = 0
-        skipped = 0
-        start = time.time()
-
-        for i, row in enumerate(rows):
-            book_id, isbn, title = row
-            short_title = (title or "")[:40]
-
-            try:
-                product = crawler.search_by_isbn(isbn)
-                if product and product.get("description"):
-                    desc = product["description"].strip()
-                    if not dry_run:
-                        conn.execute(
-                            text("UPDATE books SET description = :desc WHERE id = :id"),
-                            {"desc": desc, "id": book_id}
-                        )
-                        if (filled + 1) % 20 == 0:
-                            conn.commit()
-                    filled += 1
-                    logger.info(f"  [{i+1}/{total}] API: {short_title} ({len(desc)}자)")
-                else:
-                    skipped += 1
-            except Exception as e:
-                skipped += 1
-                logger.error(f"  [{i+1}/{total}] 오류: {short_title} - {e}")
-
-            time.sleep(1)
-
-        if not dry_run:
-            conn.commit()
-
-        elapsed = time.time() - start
-        logger.info(f"알라딘 완료: 채움 {filled}, 스킵 {skipped} ({elapsed:.0f}초)")
+    """1차: 알라딘 API로 설명 채우기 (비활성 — description 컬럼 삭제됨)"""
+    logger.warning("Book.description 컬럼이 삭제되어 이 기능은 비활성화되었습니다.")
+    logger.info("상품 설명은 WING API 등록 시 '상세페이지 참조'로 설정됩니다.")
+    return
 
 
 def fill_from_template(limit=0, dry_run=False):
-    """2차: 템플릿으로 설명 자동 생성"""
-    with engine.connect() as conn:
-        query = """
-            SELECT DISTINCT b.id, b.isbn, b.title, b.author,
-              b.publisher_name, b.list_price
-            FROM listings l
-            JOIN products p ON l.product_id = p.id
-            JOIN books b ON p.book_id = b.id
-            WHERE l.coupang_status = 'active'
-            AND (b.description IS NULL OR b.description = '')
-            ORDER BY b.id
-        """
-        if limit > 0:
-            query += f" LIMIT {limit}"
-
-        rows = conn.execute(text(query)).fetchall()
-        total = len(rows)
-
-        if total == 0:
-            logger.info("채울 도서가 없습니다.")
-            return
-
-        logger.info(f"설명 누락 도서: {total}권 (템플릿 자동 생성)")
-        if dry_run:
-            logger.info("** DRY RUN 모드 **")
-
-        filled = 0
-
-        for i, row in enumerate(rows):
-            book_id, isbn, title, author, publisher, list_price = row
-            short_title = (title or "")[:40]
-
-            cat_type = _classify_book(title, publisher)
-            desc = generate_description(title, author, publisher, list_price, cat_type)
-
-            if not dry_run:
-                conn.execute(
-                    text("UPDATE books SET description = :desc WHERE id = :id"),
-                    {"desc": desc, "id": book_id}
-                )
-            filled += 1
-            logger.info(f"  [{i+1}/{total}] {cat_type}: {short_title} → {desc[:50]}...")
-
-        if not dry_run:
-            conn.commit()
-
-        logger.info(f"템플릿 완료: {filled}권 생성")
+    """2차: 템플릿으로 설명 자동 생성 (비활성 — description 컬럼 삭제됨)"""
+    logger.warning("Book.description 컬럼이 삭제되어 이 기능은 비활성화되었습니다.")
+    logger.info("상품 설명은 WING API 등록 시 '상세페이지 참조'로 설정됩니다.")
+    return
 
 
 if __name__ == "__main__":

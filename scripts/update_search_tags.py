@@ -688,9 +688,9 @@ def main():
                 auth_name = ""
                 cat_name = ""
                 if book:
-                    pub_name = book.publisher_name or ""
-                    auth_name = book.author or ""
-                    cat_name = book.category or ""
+                    pub_name = book.publisher.name if book.publisher else ""
+                    auth_name = ""  # author 컬럼 삭제됨
+                    cat_name = ""  # category 컬럼 삭제됨
                 elif listing.brand:
                     pub_name = listing.brand
 

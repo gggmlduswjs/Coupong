@@ -67,13 +67,9 @@ class MarginCalculator:
         if not publisher:
             if book.publisher_id:
                 publisher = self.db.query(Publisher).get(book.publisher_id)
-            elif book.publisher_name:
-                publisher = self.db.query(Publisher).filter(
-                    Publisher.name.contains(book.publisher_name)
-                ).first()
 
         if not publisher:
-            logger.warning(f"출판사를 찾을 수 없습니다: {book.publisher_name}")
+            logger.warning(f"출판사를 찾을 수 없습니다: book_id={book.id}, isbn={book.isbn}")
             return None
 
         # 마진 계산
@@ -130,7 +126,7 @@ class MarginCalculator:
             publisher = self.db.query(Publisher).get(book.publisher_id)
 
         if not publisher:
-            raise ValueError(f"출판사를 찾을 수 없습니다: {book.publisher_name}")
+            raise ValueError(f"출판사를 찾을 수 없습니다: book_id={book.id}")
 
         # Product 생성 (모델의 클래스 메서드 사용)
         product = Product.create_from_book(book, publisher)
@@ -172,8 +168,11 @@ class MarginCalculator:
         if book_ids:
             query = query.filter(Book.id.in_(book_ids))
         else:
-            # 미처리 도서만
-            query = query.filter(Book.is_processed == False)
+            # Product가 없는 도서만 (미분석)
+            from sqlalchemy import exists
+            query = query.filter(
+                ~exists().where(Product.book_id == Book.id)
+            )
 
         books = query.all()
 

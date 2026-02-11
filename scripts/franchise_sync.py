@@ -146,22 +146,12 @@ class FranchiseSync:
             book = Book(
                 isbn=isbn,
                 title=item["title"],
-                author=item.get("author", ""),
                 publisher_id=matched_pub.id,
-                publisher_name=matched_pub.name,
                 list_price=item["original_price"],
-                category=item.get("category", "도서"),
-                subcategory=item.get("subcategory", ""),
                 year=item.get("year"),
                 normalized_title=item.get("normalized_title", ""),
                 normalized_series=item.get("normalized_series", ""),
-                image_url=item.get("image_url", ""),
-                description=item.get("description", ""),
-                source_url=item.get("kyobo_url", ""),
-                publish_date=item.get("publish_date"),
-                page_count=item.get("page_count", 0),
                 sales_point=item.get("sales_point", 0),
-                is_processed=False,
                 crawled_at=datetime.utcnow(),
             )
             book.process_metadata()
@@ -321,22 +311,12 @@ class FranchiseSync:
                 book = Book(
                     isbn=isbn,
                     title=item["title"],
-                    author=item.get("author", ""),
                     publisher_id=publisher.id,
-                    publisher_name=pub_name,
                     list_price=item["original_price"],
-                    category=item.get("category", "도서"),
-                    subcategory=item.get("subcategory", ""),
                     year=item.get("year"),
                     normalized_title=item.get("normalized_title", ""),
                     normalized_series=item.get("normalized_series", ""),
-                    image_url=item.get("image_url", ""),
-                    description=item.get("description", ""),
-                    source_url=item.get("kyobo_url", ""),
-                    publish_date=item.get("publish_date"),
-                    page_count=item.get("page_count", 0),
                     sales_point=item.get("sales_point", 0),
-                    is_processed=False,
                     crawled_at=datetime.utcnow(),
                 )
                 book.process_metadata()
@@ -379,7 +359,11 @@ class FranchiseSync:
             {"created": int, "bundle_needed": int, "products": [Product]}
         """
         if books is None:
-            books = self.db.query(Book).filter(Book.is_processed == False).all()
+            # Product가 아직 없는 Book = 미처리
+            from sqlalchemy import exists
+            books = self.db.query(Book).filter(
+                ~exists().where(Product.book_id == Book.id)
+            ).all()
 
         if not books:
             logger.info("분석할 신규 도서가 없습니다.")
@@ -401,7 +385,6 @@ class FranchiseSync:
             # 이미 Product 존재하면 스킵
             existing = self.db.query(Product).filter(Product.isbn == book.isbn).first()
             if existing:
-                book.is_processed = True
                 continue
 
             product = Product.create_from_book(book, publisher)
@@ -411,7 +394,7 @@ class FranchiseSync:
             if not product.can_upload_single:
                 bundle_count += 1
 
-            book.is_processed = True
+            # Product 생성 완료 (is_processed 불필요 — Product 존재로 판별)
 
         self.db.commit()
 
@@ -438,11 +421,10 @@ class FranchiseSync:
                 ...
             }
         """
-        # 업로드 가능한 전체 상품 (승인된 것만)
+        # 업로드 가능한 전체 상품
         all_products = self.db.query(Product).filter(
             Product.status == 'ready',
             Product.can_upload_single == True,
-            Product.registration_status == 'approved',
         ).all()
         total_products = len(all_products)
 
@@ -557,15 +539,16 @@ class FranchiseSync:
                 results.append({"isbn": product.isbn, "success": False, "message": "Book 없음"})
                 continue
 
+            publisher = book.publisher
             pd_data = {
                 "product_name": book.title,
-                "publisher": book.publisher_name or "",
-                "author": book.author or "",
+                "publisher": publisher.name if publisher else "",
+                "author": "",
                 "isbn": book.isbn,
                 "original_price": book.list_price,
                 "sale_price": product.sale_price,
-                "main_image_url": book.image_url or "",
-                "description": book.description or "상세페이지 참조",
+                "main_image_url": "",
+                "description": "상세페이지 참조",
                 "shipping_policy": product.shipping_policy,
             }
 
@@ -603,17 +586,14 @@ class FranchiseSync:
                     try:
                         listing = Listing(
                             account_id=account.id,
-                            product_type='single',
                             product_id=product.id,
-                            isbn=product.isbn,
-                            coupang_product_id=sid,
+                            coupang_product_id=int(sid) if sid else 0,
                             coupang_status='active',
                             sale_price=product.sale_price,
                             original_price=product.list_price,
                             product_name=book.title,
-                            shipping_policy=product.shipping_policy,
-                            upload_method='api',
-                            uploaded_at=datetime.utcnow(),
+                            isbn=product.isbn,
+                            synced_at=datetime.utcnow(),
                         )
                         self.db.add(listing)
                         self.db.commit()

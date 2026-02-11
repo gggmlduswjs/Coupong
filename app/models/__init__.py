@@ -4,8 +4,8 @@ from app.models.publisher import Publisher
 from app.models.book import Book
 from app.models.product import Product
 from app.models.bundle_sku import BundleSKU
+from app.models.bundle_item import BundleItem
 from app.models.listing import Listing
-from app.models.sales import Sales
 from app.models.analysis_result import AnalysisResult
 
 from app.models.revenue_history import RevenueHistory
@@ -21,8 +21,8 @@ __all__ = [
     "Book",
     "Product",
     "BundleSKU",
+    "BundleItem",
     "Listing",
-    "Sales",
     "AnalysisResult",
 
     "RevenueHistory",

@@ -6,9 +6,7 @@
 대상 속성:
   - 사용연도: 제목에서 추출
   - 학기구분: 제목에서 추출
-  - 출시년월: books.publish_date
-  - 출판사: books.publisher_name
-  - 저자: books.author
+  - 출판사: publishers.name (via book.publisher)
   - 발행언어: "한국어"
   - ISBN: books.isbn
 
@@ -59,7 +57,7 @@ def _extract_year(title: str) -> str:
 
 
 def _extract_publish_month(publish_date) -> str:
-    """출간일 → '2026.01' 형식"""
+    """출간일 → '2026.01' 형식 (publish_date 컬럼 삭제됨, 호환성 유지)"""
     if not publish_date:
         return ""
     s = str(publish_date)
@@ -356,9 +354,9 @@ def main():
                         if book:
                             book_data = {
                                 "isbn": book.isbn or "",
-                                "author": book.author or "",
-                                "publisher_name": book.publisher_name or "",
-                                "publish_date": book.publish_date,
+                                "author": "",  # author 컬럼 삭제됨
+                                "publisher_name": book.publisher.name if book.publisher else "",
+                                "publish_date": None,  # publish_date 컬럼 삭제됨
                             }
 
                 # 각 item의 attributes 수정

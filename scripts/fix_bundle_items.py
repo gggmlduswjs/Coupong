@@ -360,11 +360,11 @@ def get_target_listings(db, args, account: Account) -> List[Listing]:
     if args.product_id:
         query = query.filter(Listing.coupang_product_id == args.product_id)
     elif args.all_bundles:
-        # bundle 타입이거나 isbn에 쉼표 포함
+        # bundle_id 있거나 isbn에 쉼표 포함 (product_type 삭제됨)
         from sqlalchemy import or_
         query = query.filter(
             or_(
-                Listing.product_type == 'bundle',
+                Listing.bundle_id.isnot(None),
                 Listing.isbn.like('%,%'),
             )
         )

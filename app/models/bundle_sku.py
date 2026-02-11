@@ -1,10 +1,9 @@
 """묶음 SKU 모델"""
-from sqlalchemy import Column, Integer, String, Text, Float, DateTime, ForeignKey
+from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from app.database import Base
 from app.constants import BOOK_DISCOUNT_RATE, DEFAULT_SHIPPING_COST, FREE_SHIPPING_THRESHOLD
-import json
 
 
 class BundleSKU(Base):
@@ -24,8 +23,6 @@ class BundleSKU(Base):
 
     # 구성
     book_count = Column(Integer, nullable=False)  # 묶음 권수
-    book_ids = Column(Text, nullable=False)  # JSON: [1, 2, 3]
-    isbns = Column(Text, nullable=False)  # JSON: ["9781234", "9785678"]
 
     # 가격 (도서정가제)
     total_list_price = Column(Integer, nullable=False)  # 정가 합계
@@ -40,13 +37,12 @@ class BundleSKU(Base):
     # 배송 정책
     shipping_policy = Column(String(20), default='free')  # 묶음은 기본 무료배송
 
-    # 상태
-    status = Column(String(20), default='ready', index=True)  # ready, uploaded, excluded
     created_at = Column(DateTime, default=datetime.utcnow)
 
     # Relationships
     publisher = relationship("Publisher", back_populates="bundle_skus")
     listings = relationship("Listing", back_populates="bundle")
+    items = relationship("BundleItem", back_populates="bundle", cascade="all, delete-orphan")
 
     def __repr__(self):
         return f"<BundleSKU(bundle_key='{self.bundle_key}', count={self.book_count}, net_margin={self.net_margin})>"
@@ -56,14 +52,7 @@ class BundleSKU(Base):
         """
         도서 리스트로부터 묶음 SKU 생성
 
-        Args:
-            books: Book 인스턴스 리스트
-            publisher: Publisher 인스턴스
-            year: 연도
-            normalized_series: 정규화된 시리즈명
-
-        Returns:
-            BundleSKU 인스턴스
+        주의: BundleItem 레코드는 별도로 생성해야 함 (bundle.id 필요)
         """
         if not books:
             raise ValueError("도서가 없습니다")
@@ -72,8 +61,6 @@ class BundleSKU(Base):
         bundle_key = f"{publisher.id}_{normalized_series}_{year}"
 
         # 도서 정보 수집
-        book_ids = [book.id for book in books]
-        isbns = [book.isbn for book in books]
         total_list_price = sum(book.list_price for book in books)
 
         # 묶음명 생성
@@ -92,8 +79,6 @@ class BundleSKU(Base):
             normalized_series=normalized_series,
             year=year,
             book_count=len(books),
-            book_ids=json.dumps(book_ids),
-            isbns=json.dumps(isbns),
             total_list_price=total_list_price,
             total_sale_price=total_sale_price,
             supply_rate=publisher.supply_rate,
@@ -101,18 +86,17 @@ class BundleSKU(Base):
             shipping_cost=margin_info['shipping_cost'],
             net_margin=margin_info['net_margin'],
             shipping_policy='free' if margin_info['net_margin'] >= FREE_SHIPPING_THRESHOLD else 'paid',
-            status='ready'
         )
 
         return bundle
 
     def get_book_ids(self):
-        """book_ids JSON 파싱"""
-        return json.loads(self.book_ids)
+        """items relationship에서 book_id 리스트 반환"""
+        return [item.book_id for item in self.items]
 
     def get_isbns(self):
-        """isbns JSON 파싱"""
-        return json.loads(self.isbns)
+        """items relationship에서 isbn 리스트 반환"""
+        return [item.isbn for item in self.items]
 
     @property
     def is_profitable(self):
@@ -130,7 +114,7 @@ class BundleSKU(Base):
 
         existing = db_session.query(Listing).filter(
             Listing.account_id == account_id,
-            Listing.bundle_key == self.bundle_key
+            Listing.bundle_id == self.id
         ).first()
 
         return existing is not None
@@ -141,7 +125,7 @@ class BundleSKU(Base):
 
         # 이미 업로드된 계정 조회
         uploaded_accounts = db_session.query(Listing.account_id).filter(
-            Listing.bundle_key == self.bundle_key,
+            Listing.bundle_id == self.id,
             Listing.account_id.in_(account_ids)
         ).all()
 

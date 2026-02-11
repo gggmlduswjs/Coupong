@@ -1,5 +1,8 @@
-"""상품 등록 현황 모델"""
-from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, Text, UniqueConstraint
+"""상품 등록 현황 모델 — 쿠팡 API 미러 + 내부 매칭 FK"""
+from sqlalchemy import (
+    Column, Integer, BigInteger, String, ForeignKey, DateTime, Text, Index,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from app.database import Base
@@ -7,75 +10,58 @@ from app.constants import LOW_STOCK_THRESHOLD
 
 
 class Listing(Base):
-    """계정별 상품 등록 현황 (단권/묶음 모두 지원)"""
+    """
+    계정별 쿠팡 상품 미러 (API → DB 동기화)
+
+    - 쿠팡 API 필드를 그대로 저장
+    - product_id / bundle_id FK로 내부 상품과 매칭
+    """
 
     __tablename__ = "listings"
     __table_args__ = (
-        # 중복 방지: 동일 계정 + 동일 묶음키
-        UniqueConstraint("account_id", "bundle_key", name="uix_account_bundle"),
-        # 중복 방지: 동일 계정 + 동일 ISBN
-        UniqueConstraint("account_id", "isbn", name="uix_account_isbn"),
+        UniqueConstraint("account_id", "coupang_product_id", name="uix_account_coupang_pid"),
+        Index("ix_listing_account_status", "account_id", "coupang_status"),
+        Index("ix_listing_account_vendor_item", "account_id", "vendor_item_id"),
+        Index("ix_listing_isbn", "isbn"),
     )
 
-    id = Column(Integer, primary_key=True, index=True)
-
-    # 계정
+    id = Column(Integer, primary_key=True)
     account_id = Column(Integer, ForeignKey("accounts.id"), nullable=False, index=True)
 
-    # 상품 (단권 또는 묶음)
-    product_type = Column(String(20), nullable=False, index=True)  # 'single', 'bundle'
-    product_id = Column(Integer, ForeignKey("products.id"), index=True)  # 단권용
-    bundle_id = Column(Integer, ForeignKey("bundle_skus.id"), index=True)  # 묶음용
-    isbn = Column(Text, index=True)  # ISBN (단권: 단일, 세트: 쉼표 구분)
-    bundle_key = Column(String(200), index=True)  # 묶음용
+    # ─── 쿠팡 API 필드 (list_products + get_product + get_item_inventory) ───
+    coupang_product_id = Column(BigInteger, nullable=False)          # sellerProductId
+    vendor_item_id     = Column(BigInteger)                          # items[0].vendorItemId
+    product_name       = Column(String(500))                         # sellerProductName
+    coupang_status     = Column(String(20), default='pending')       # active/paused/sold_out/pending
+    original_price     = Column(Integer, default=0)                  # originalPrice (정가)
+    sale_price         = Column(Integer, default=0)                  # salePrice (판매가)
+    supply_price       = Column(Integer)                             # supplyPrice (공급가)
+    stock_quantity     = Column(Integer, default=0)                  # amountInStock
+    display_category_code = Column(String(20))                       # displayCategoryCode
+    delivery_charge_type  = Column(String(20))                       # FREE/NOT_FREE/CONDITIONAL_FREE
+    delivery_charge       = Column(Integer)                          # deliveryCharge
+    free_ship_over_amount = Column(Integer)                          # freeShipOverAmount
+    return_charge         = Column(Integer)                          # returnCharge
+    brand                 = Column(String(200))                      # brand
 
-    # 쿠팡 정보
-    coupang_product_id = Column(String(50))  # 쿠팡 상품 ID
-    coupang_status = Column(String(20), default='pending', index=True)  # pending, active, sold_out
+    # ─── ISBN (API에서 추출, 세트는 쉼표 구분 복수) ───
+    isbn = Column(Text)  # 단권: "9788961057455", 세트: "9788961057455,9788961057462"
 
-    # 상품 정보
-    product_name = Column(String(500))  # 상품명 (쿠팡 표시명)
-    original_price = Column(Integer, default=0)  # 정가
+    # ─── 내부 매칭 (nullable — 매칭 안 된 상품은 NULL) ───
+    product_id = Column(Integer, ForeignKey("products.id"))          # 단권 매칭
+    bundle_id  = Column(Integer, ForeignKey("bundle_skus.id"))       # 묶음 매칭
 
-    # 판매 정보
-    sale_price = Column(Integer, nullable=False)
-    shipping_policy = Column(String(20), nullable=False)  # 'free', 'paid'
+    # ─── 동기화 메타 ───
+    raw_json         = Column(Text)          # API 상세 응답 캐시
+    detail_synced_at = Column(DateTime)      # 상세 조회 시각
+    synced_at        = Column(DateTime)      # 마지막 동기화 시각
+    created_at       = Column(DateTime, default=datetime.utcnow)
+    updated_at       = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    # 재고/가격 동기화
-    vendor_item_id = Column(String(50))  # WING API update_inventory() 호출에 필수
-    coupang_sale_price = Column(Integer, default=0)  # 쿠팡 현재 판매가 (목표가와 비교용)
-    stock_quantity = Column(Integer, default=10)  # 현재 재고 수량
-
-    # 상세 API 필드
-    brand = Column(String(200))                    # 브랜드
-    display_category_code = Column(String(20))     # 카테고리코드
-    delivery_charge_type = Column(String(20))      # FREE / NOT_FREE / CONDITIONAL_FREE
-    maximum_buy_count = Column(Integer)            # 쿠팡 실재고 (items[0].maximumBuyCount)
-    supply_price = Column(Integer)                 # 공급가 (items[0].supplyPrice)
-    delivery_charge = Column(Integer)              # 배송비
-    free_ship_over_amount = Column(Integer)        # 무료배송 기준금액
-    return_charge = Column(Integer)                # 반품 배송비
-
-    # 아이템 위너
-    winner_status = Column(String(20))             # 'winner', 'not_winner', None(미확인)
-    winner_checked_at = Column(DateTime)           # 마지막 위너 체크 시간
-    item_id = Column(String(50))                   # 쿠팡 아이템 ID (productId)
-
-    # Raw data
-    raw_json = Column(Text)                        # 상세 API 전체 응답 JSON
-    detail_synced_at = Column(DateTime)            # 마지막 상세 동기화 시각
-
-    # 업로드 정보
-    upload_method = Column(String(20))  # csv, playwright
-    uploaded_at = Column(DateTime, default=datetime.utcnow)
-    last_checked_at = Column(DateTime)
-    error_message = Column(Text)
-
-    # Relationships
+    # ─── Relationships ───
     account = relationship("Account", back_populates="listings")
     product = relationship("Product", back_populates="listings")
     bundle = relationship("BundleSKU", back_populates="listings")
-    sales = relationship("Sales", back_populates="listing")
     analysis_results = relationship("AnalysisResult", back_populates="listing")
     orders = relationship("Order", back_populates="listing")
     revenue_history = relationship("RevenueHistory", back_populates="listing")
@@ -83,38 +69,21 @@ class Listing(Base):
     ad_performances = relationship("AdPerformance", back_populates="listing")
 
     def __repr__(self):
-        if self.product_type == 'single':
-            return f"<Listing(account={self.account_id}, isbn='{self.isbn}', status='{self.coupang_status}')>"
-        else:
-            return f"<Listing(account={self.account_id}, bundle='{self.bundle_key}', status='{self.coupang_status}')>"
+        return f"<Listing(account={self.account_id}, pid={self.coupang_product_id}, status='{self.coupang_status}')>"
 
-    @classmethod
-    def create_from_product(cls, account_id, product, upload_method='csv'):
-        """단권 상품으로부터 Listing 생성"""
-        return cls(
-            account_id=account_id,
-            product_type='single',
-            product_id=product.id,
-            isbn=product.isbn,
-            sale_price=product.sale_price,
-            shipping_policy=product.shipping_policy,
-            upload_method=upload_method,
-            uploaded_at=datetime.utcnow()
-        )
+    # ─── 타입 판단 프로퍼티 ───
 
-    @classmethod
-    def create_from_bundle(cls, account_id, bundle, upload_method='csv'):
-        """묶음 SKU로부터 Listing 생성"""
-        return cls(
-            account_id=account_id,
-            product_type='bundle',
-            bundle_id=bundle.id,
-            bundle_key=bundle.bundle_key,
-            sale_price=bundle.total_sale_price,
-            shipping_policy=bundle.shipping_policy,
-            upload_method=upload_method,
-            uploaded_at=datetime.utcnow()
-        )
+    @property
+    def is_single(self):
+        """단권 상품인지"""
+        return self.product_id is not None
+
+    @property
+    def is_bundle(self):
+        """묶음 상품인지"""
+        return self.bundle_id is not None
+
+    # ─── 상태 프로퍼티 ───
 
     @property
     def is_active(self):
@@ -128,10 +97,10 @@ class Listing(Base):
 
     @property
     def has_price_diff(self):
-        """목표가와 쿠팡가가 다른지"""
-        if not self.coupang_sale_price or self.coupang_sale_price == 0:
-            return False
-        return self.sale_price != self.coupang_sale_price
+        """내부 Product의 sale_price와 쿠팡 가격이 다른지"""
+        if self.product and self.product.sale_price:
+            return self.sale_price != self.product.sale_price
+        return False
 
     @property
     def is_low_stock(self):
@@ -139,18 +108,12 @@ class Listing(Base):
         return (self.stock_quantity or 0) <= LOW_STOCK_THRESHOLD
 
     @property
-    def is_winner(self):
-        """아이템 위너인지"""
-        return self.winner_status == 'winner'
-
-    @property
     def can_update(self):
         """API 업데이트 가능 여부 (vendor_item_id 필수)"""
         return bool(self.vendor_item_id) and self.coupang_status == 'active'
 
-    def get_product_info(self, db_session):
-        """상품 정보 조회 (단권/묶음 자동 판별)"""
-        if self.product_type == 'single':
-            return db_session.query(Product).get(self.product_id)
-        else:
-            return db_session.query(BundleSKU).get(self.bundle_id)
+    def _extract_isbns(self) -> list:
+        """isbn 필드에서 ISBN 리스트 추출"""
+        if not self.isbn:
+            return []
+        return [i.strip() for i in self.isbn.split(",") if i.strip()]

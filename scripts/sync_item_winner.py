@@ -1,15 +1,13 @@
 """
-아이템 위너 동기화
-==================
-listings 테이블의 active 상품에 대해 WING API get_product()를 호출하여
-아이템 위너(Buy Box) 여부를 확인하고 DB에 저장.
+아이템 위너 동기화 (비활성)
+===========================
+winner_status, winner_checked_at, item_id 컬럼이 삭제되어
+DB 저장 기능은 비활성화됨.
+현재는 dry-run으로 API 응답에서 winner 필드 존재 여부만 확인 가능.
 
 사용법:
-    python scripts/sync_item_winner.py                    # 전체 active 상품 위너 체크
-    python scripts/sync_item_winner.py --account 007-bm   # 특정 계정만
     python scripts/sync_item_winner.py --dry-run           # API 응답 확인만 (1건)
-    python scripts/sync_item_winner.py --force             # 이미 체크된 것도 재확인
-    python scripts/sync_item_winner.py --stale-hours 12    # 12시간 이상 지난 것만
+    python scripts/sync_item_winner.py --account 007-bm    # 특정 계정만
 """
 import sys
 import os
@@ -41,11 +39,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def _safe_commit(db):
-    """DB 커밋"""
-    db.commit()
-
-
 def create_wing_client(account: Account) -> CoupangWingClient:
     """Account 모델에서 WING API 클라이언트 생성"""
     if not account.has_wing_api:
@@ -57,7 +50,7 @@ def create_wing_client(account: Account) -> CoupangWingClient:
     )
 
 
-def check_winner_field_exists(client: CoupangWingClient, seller_product_id: str) -> dict:
+def check_winner_field_exists(client: CoupangWingClient, seller_product_id) -> dict:
     """
     단건 API 호출로 winner 필드 존재 여부 확인 (dry-run용)
 
@@ -90,7 +83,7 @@ def sync_account_winners(
     db, account: Account, force: bool = False, stale_hours: int = 24,
 ) -> dict:
     """
-    단일 계정의 active 상품에 대해 위너 상태 동기화
+    단일 계정의 active 상품에 대해 위너 상태 확인 (DB 저장 없음 — 컬럼 삭제됨)
 
     Returns:
         {"total", "winner", "not_winner", "unknown", "error", "skipped"}
@@ -122,14 +115,8 @@ def sync_account_winners(
         return result
 
     now = datetime.utcnow()
-    stale_cutoff = now - timedelta(hours=stale_hours)
 
     for i, lst in enumerate(listings, 1):
-        # force가 아니면, 최근 체크된 것은 스킵
-        if not force and lst.winner_checked_at and lst.winner_checked_at > stale_cutoff:
-            result["skipped"] += 1
-            continue
-
         try:
             resp = client.get_product(int(lst.coupang_product_id))
             data = resp.get("data", resp) if isinstance(resp, dict) else resp
@@ -141,34 +128,23 @@ def sync_account_winners(
 
             item = items[0]
 
-            # winner 필드 파싱
+            # winner 필드 파싱 (로깅만, DB 저장 없음)
             winner_raw = item.get("winner")
             if winner_raw is True:
-                lst.winner_status = "winner"
                 result["winner"] += 1
             elif winner_raw is False:
-                lst.winner_status = "not_winner"
                 result["not_winner"] += 1
             else:
-                # winner 필드가 없으면 salesStatus로 추정
-                lst.winner_status = None
                 result["unknown"] += 1
 
-            lst.winner_checked_at = now
-
-            # item_id 저장 (아직 없는 경우)
-            item_id = item.get("itemId")
-            if item_id and not lst.item_id:
-                lst.item_id = str(item_id)
-
-            # vendor_item_id도 갱신
+            # vendor_item_id 갱신 (이 컬럼은 남아있음)
             vid = item.get("vendorItemId")
             if vid and not lst.vendor_item_id:
-                lst.vendor_item_id = str(vid)
+                lst.vendor_item_id = vid
 
             # 50건마다 중간 커밋
             if i % 50 == 0:
-                _safe_commit(db)
+                db.commit()
                 logger.info(f"    진행: {i}/{len(listings)} (위너:{result['winner']}, 비위너:{result['not_winner']})")
 
         except CoupangWingError as e:
@@ -182,7 +158,7 @@ def sync_account_winners(
             result["error"] += 1
             logger.warning(f"    위너 조회 오류 [{lst.coupang_product_id}]: {type(e).__name__}: {e}")
 
-    _safe_commit(db)
+    db.commit()
     logger.info(f"  완료: 위너 {result['winner']}개, 비위너 {result['not_winner']}개, "
                 f"미확인 {result['unknown']}개, 에러 {result['error']}개, 스킵 {result['skipped']}개")
 
@@ -194,6 +170,8 @@ def run_sync(account_names=None, dry_run=False, force=False, stale_hours=24):
     print("\n" + "=" * 60)
     print("  아이템 위너 동기화")
     print(f"  시작: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    if not dry_run:
+        print("  주의: winner_status/item_id 컬럼 삭제됨 — DB 저장 없이 집계만 수행")
     print("=" * 60)
 
     init_db()

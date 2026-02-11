@@ -34,9 +34,6 @@ class Product(Base):
     status = Column(String(20), default='ready', index=True)  # ready, uploaded, excluded
     exclude_reason = Column(Text)  # 제외 사유
 
-    # 등록 승인 상태
-    registration_status = Column(String(20), default='pending_review', index=True)  # pending_review, approved, rejected
-
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -49,16 +46,7 @@ class Product(Base):
 
     @classmethod
     def create_from_book(cls, book, publisher):
-        """
-        Book과 Publisher로부터 Product 생성
-
-        Args:
-            book: Book 인스턴스
-            publisher: Publisher 인스턴스
-
-        Returns:
-            Product 인스턴스
-        """
+        """Book과 Publisher로부터 Product 생성"""
         # 마진 계산
         margin_info = publisher.calculate_margin(book.list_price)
 
@@ -88,19 +76,9 @@ class Product(Base):
         return product
 
     @property
-    def is_pending_review(self):
-        """검토 대기 중인 상품인지"""
-        return self.registration_status == 'pending_review'
-
-    @property
-    def is_approved(self):
-        """승인된 상품인지"""
-        return self.registration_status == 'approved'
-
-    @property
     def can_upload(self):
-        """업로드 가능한 상품인지 (ready + 승인 + 단권가능)"""
-        return self.status == 'ready' and self.registration_status == 'approved' and self.can_upload_single
+        """업로드 가능한 상품인지 (ready + 단권가능)"""
+        return self.status == 'ready' and self.can_upload_single
 
     @property
     def is_profitable(self):
@@ -118,7 +96,7 @@ class Product(Base):
 
         existing = db_session.query(Listing).filter(
             Listing.account_id == account_id,
-            Listing.isbn == self.isbn
+            Listing.product_id == self.id
         ).first()
 
         return existing is not None
@@ -129,7 +107,7 @@ class Product(Base):
 
         # 이미 업로드된 계정 조회
         uploaded_accounts = db_session.query(Listing.account_id).filter(
-            Listing.isbn == self.isbn,
+            Listing.product_id == self.id,
             Listing.account_id.in_(account_ids)
         ).all()
 

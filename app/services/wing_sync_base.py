@@ -175,18 +175,18 @@ def match_listing(conn, account_id: int, vendor_item_id=None,
     Returns:
         listings.id 또는 None
     """
-    # 1차: vendor_item_id 매칭 (가장 정확)
+    # 1차: vendor_item_id 매칭 (가장 정확, BigInteger)
     if vendor_item_id:
         row = conn.execute(text(
             "SELECT id FROM listings WHERE account_id = :aid AND vendor_item_id = :vid LIMIT 1"
-        ), {"aid": account_id, "vid": str(vendor_item_id)}).fetchone()
+        ), {"aid": account_id, "vid": int(vendor_item_id)}).fetchone()
         if row:
             return row[0]
-    # 2차: coupang_product_id 매칭
+    # 2차: coupang_product_id 매칭 (BigInteger)
     if coupang_product_id:
         row = conn.execute(text(
             "SELECT id FROM listings WHERE account_id = :aid AND coupang_product_id = :pid LIMIT 1"
-        ), {"aid": account_id, "pid": str(coupang_product_id)}).fetchone()
+        ), {"aid": account_id, "pid": int(coupang_product_id)}).fetchone()
         if row:
             return row[0]
     # 3차: product_name 정확 매칭

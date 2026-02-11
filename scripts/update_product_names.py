@@ -339,7 +339,7 @@ def main():
                 Listing.account_id == account.id,
                 Listing.coupang_product_id != None,
                 Listing.raw_json != None,
-                Listing.product_type != 'bundle',
+                Listing.bundle_id.is_(None),  # bundle 제외 (product_type 삭제됨)
             )
             listings = query.all()
             logger.info(f"  총 {len(listings)}개 listing (bundle 제외)")
@@ -406,9 +406,9 @@ def main():
                 auth_name = ""
                 cat_name = ""
                 if book:
-                    pub_name = book.publisher_name or ""
-                    auth_name = book.author or ""
-                    cat_name = book.category or ""
+                    pub_name = book.publisher.name if book.publisher else ""
+                    auth_name = ""  # author 컬럼 삭제됨
+                    cat_name = ""  # category 컬럼 삭제됨
                 elif listing.brand:
                     pub_name = listing.brand
 

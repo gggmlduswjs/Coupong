@@ -123,7 +123,6 @@ def export_order_sheets(days: int = 7, account_name: str = None,
             pub.name as DB출판사,
             COALESCE(l.isbn, b.isbn) as ISBN,
             b.title as DB도서명,
-            b.author as 저자,
             b.year as 출판년도
         FROM orders o
         LEFT JOIN listings l ON o.listing_id = l.id

@@ -60,10 +60,7 @@ def get_test_product(db, isbn=None):
         "original_price": product.list_price,
         "sale_price": product.sale_price,
         "isbn": product.isbn,
-        "publisher": book.publisher_name or "",
-        "author": book.author or "",
-        "main_image_url": book.image_url or "",
-        "description": book.description or "상세페이지 참조",
+        "publisher": book.publisher.name if book.publisher else "",
         "shipping_policy": product.shipping_policy,
         "net_margin": product.net_margin,
     }

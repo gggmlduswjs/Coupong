@@ -196,13 +196,9 @@ def import_to_db(account_name, products):
             # Listing 생성 (기존 쿠팡 등록 상품)
             listing = Listing(
                 account_id=account.id,
-                product_type="single",
                 isbn=isbn,
                 sale_price=product.get("sale_price", 0),
-                shipping_policy="unknown",  # 기존 상품은 정책 모름
-                upload_method="existing",   # 기존 등록 표시
                 coupang_status="active",    # 이미 활성 상태
-                uploaded_at=datetime.utcnow(),
             )
             db.add(listing)
             imported += 1
@@ -317,11 +313,7 @@ def import_batch():
 
     for acc in accounts:
         total = db.query(Listing).filter(Listing.account_id == acc.id).count()
-        existing = db.query(Listing).filter(
-            Listing.account_id == acc.id,
-            Listing.upload_method == "existing"
-        ).count()
-        print(f"  {acc.account_name:15s}: 총 {total}개 (기존 {existing}개)")
+        print(f"  {acc.account_name:15s}: 총 {total}개")
 
     db.close()
 
@@ -338,15 +330,7 @@ def show_status():
 
     for acc in accounts:
         total = db.query(Listing).filter(Listing.account_id == acc.id).count()
-        existing = db.query(Listing).filter(
-            Listing.account_id == acc.id,
-            Listing.upload_method == "existing"
-        ).count()
-        csv_count = db.query(Listing).filter(
-            Listing.account_id == acc.id,
-            Listing.upload_method == "csv"
-        ).count()
-        print(f"  {acc.account_name:15s}: 총 {total}개 (기존 import {existing}개 + CSV 생성 {csv_count}개)")
+        print(f"  {acc.account_name:15s}: 총 {total}개")
 
     # 전체 고유 ISBN 수
     from sqlalchemy import func

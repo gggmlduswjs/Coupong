@@ -78,24 +78,8 @@ def _migrate_account_columns():
 
 
 def _migrate_product_registration_status():
-    """Product 테이블에 registration_status 컬럼 추가 + 기존 데이터 approved로 설정"""
-    try:
-        inspector = inspect(engine)
-        existing_cols = {col["name"] for col in inspector.get_columns("products")}
-
-        if "registration_status" not in existing_cols:
-            with engine.connect() as conn:
-                conn.execute(text(
-                    "ALTER TABLE products ADD COLUMN registration_status VARCHAR(20) DEFAULT 'pending_review'"
-                ))
-                # 기존 데이터는 이미 운영 중이므로 approved로 설정 (하위 호환)
-                conn.execute(text(
-                    "UPDATE products SET registration_status = 'approved' WHERE registration_status IS NULL OR registration_status = 'pending_review'"
-                ))
-                conn.commit()
-            logger.info("  컬럼 추가: products.registration_status (기존 데이터 → approved)")
-    except Exception:
-        pass  # 테이블이 아직 없으면 init_db()에서 생성됨
+    """(삭제됨 — registration_status 컬럼 제거)"""
+    pass
 
 
 # ─────────────────────────────────────────────
@@ -154,7 +138,6 @@ def seed_accounts(db):
             existing = Account(
                 account_name=account_id,
                 email=account_id,
-                password_encrypted=account_pw or "",
             )
             db.add(existing)
             created += 1
@@ -235,21 +218,12 @@ def search_and_save_books(db, crawler, publisher_names=None, max_results=20):
             book = Book(
                 isbn=isbn,
                 title=item["title"],
-                author=item.get("author", ""),
                 publisher_id=publisher.id,
-                publisher_name=pub_name,
                 list_price=item["original_price"],
-                category=item.get("category", "도서"),
-                subcategory=item.get("subcategory", ""),
                 year=item.get("year"),
                 normalized_title=item.get("normalized_title", ""),
                 normalized_series=item.get("normalized_series", ""),
-                image_url=item.get("image_url", ""),
-                description=item.get("description", ""),
-                source_url=item.get("kyobo_url", ""),
-                publish_date=item.get("publish_date"),
-                page_count=item.get("page_count", 0),
-                is_processed=False,
+                sales_point=item.get("sales_point", 0),
                 crawled_at=datetime.utcnow()
             )
             book.process_metadata()
@@ -293,13 +267,16 @@ def analyze_and_create_products(db, books=None):
     미처리 Book들에 대해 마진 분석 → Product 생성
 
     Args:
-        books: 처리할 Book 리스트 (None이면 is_processed=False인 것 모두)
+        books: 처리할 Book 리스트 (None이면 Product 미생성 Book 모두)
 
     Returns:
         (생성된 Product 리스트, 묶음 필요 Book 리스트)
     """
     if books is None:
-        books = db.query(Book).filter(Book.is_processed == False).all()
+        from sqlalchemy import exists
+        books = db.query(Book).filter(
+            ~exists().where(Product.book_id == Book.id)
+        ).all()
 
     if not books:
         logger.info("분석할 도서가 없습니다.")
@@ -323,7 +300,6 @@ def analyze_and_create_products(db, books=None):
         # 이미 Product가 있는지 확인
         existing = db.query(Product).filter(Product.isbn == book.isbn).first()
         if existing:
-            book.is_processed = True
             continue
 
         # Product 생성
@@ -334,9 +310,6 @@ def analyze_and_create_products(db, books=None):
         # 묶음 필요 도서 추적
         if not product.can_upload_single:
             bundle_needed.append(book)
-
-        # 처리 완료 표시
-        book.is_processed = True
 
         margin_info = publisher.calculate_margin(book.list_price)
         policy_str = product.shipping_policy
@@ -447,11 +420,10 @@ def upload_products(db, method='auto'):
         logger.warning("등록된 계정이 없습니다.")
         return {"api": {}, "csv": {}}
 
-    # 업로드 가능한 단권 상품 (ready + 승인된 상태만)
+    # 업로드 가능한 단권 상품
     products = db.query(Product).filter(
         Product.status == 'ready',
         Product.can_upload_single == True,
-        Product.registration_status == 'approved',
     ).all()
 
     if not products:
@@ -499,15 +471,13 @@ def upload_products(db, method='auto'):
                 book = db.query(Book).filter(Book.isbn == product.isbn).first()
                 if not book:
                     continue
+                publisher = db.query(Publisher).get(book.publisher_id) if book.publisher_id else None
                 account_products.append({
                     "product_name": book.title,
                     "original_price": book.list_price,
                     "sale_price": product.sale_price,
                     "isbn": book.isbn,
-                    "publisher": book.publisher_name or "",
-                    "author": book.author or "",
-                    "main_image_url": book.image_url or "",
-                    "description": book.description or "상세페이지 참조",
+                    "publisher": publisher.name if publisher else "",
                     "shipping_policy": product.shipping_policy,
                     "net_margin": product.net_margin,
                 })
@@ -522,19 +492,8 @@ def upload_products(db, method='auto'):
                 "count": len(account_products),
             }
 
-            # CSV Listing 기록
-            for prod_data in account_products:
-                product_obj = db.query(Product).filter(
-                    Product.isbn == prod_data["isbn"]
-                ).first()
-                if product_obj:
-                    listing = Listing.create_from_product(
-                        account_id=account.id,
-                        product=product_obj,
-                        upload_method='csv'
-                    )
-                    db.add(listing)
-
+            # CSV Listing 기록 — Listing은 sync_coupang_products에서 API 동기화로 생성됨
+            # CSV 등록 후에는 다음 동기화 때 자동으로 매칭됨
             db.commit()
             logger.info(f"  {account.account_name}: {len(account_products)}개 상품 CSV 생성")
 

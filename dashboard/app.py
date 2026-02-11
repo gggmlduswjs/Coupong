@@ -49,8 +49,8 @@ def get_account_stats(db):
         # 마지막 업로드 시간
         last_listing = db.query(Listing).filter(
             Listing.account_id == account.id
-        ).order_by(Listing.uploaded_at.desc()).first()
-        last_upload = last_listing.uploaded_at if last_listing else None
+        ).order_by(Listing.synced_at.desc().nullslast()).first()
+        last_upload = last_listing.synced_at if last_listing else None
 
         # 신규 대기 상품 수 (ready 상태 + 단권 업로드 가능 + 아직 listing 없음)
         registered_isbns_stmt = select(Listing.isbn).where(
@@ -92,7 +92,7 @@ def get_registered_listings(db, account_id):
     """계정별 등록 완료 listing 조회"""
     listings = db.query(Listing).filter(
         Listing.account_id == account_id
-    ).order_by(Listing.uploaded_at.desc()).all()
+    ).order_by(Listing.synced_at.desc().nullslast()).all()
 
     return listings
 
@@ -109,10 +109,10 @@ def products_to_csv_data(products, db):
             'isbn': product.isbn,
             'sale_price': product.sale_price,
             'original_price': product.list_price,
-            'publisher': book.publisher_name or '',
-            'author': book.author or '',
-            'main_image_url': book.image_url or '',
-            'description': book.description or '',
+            'publisher': book.publisher.name if book.publisher else '',
+            'author': '',
+            'main_image_url': '',
+            'description': '',
         })
     return csv_data
 
@@ -170,8 +170,8 @@ try:
                     )
                 with filter_col2:
                     shipping_filter = st.selectbox(
-                        "배송정책",
-                        ['전체', 'free', 'paid'],
+                        "배송유형",
+                        ['전체', 'FREE', 'NOT_FREE', 'CONDITIONAL_FREE'],
                         key=f"ship_filter_{account.id}"
                     )
 
@@ -183,7 +183,7 @@ try:
                     listing_rows = []
                     for listing in listings:
                         # 필터 적용
-                        if shipping_filter != '전체' and listing.shipping_policy != shipping_filter:
+                        if shipping_filter != '전체' and listing.delivery_charge_type != shipping_filter:
                             continue
 
                         book = None
@@ -192,8 +192,8 @@ try:
                             if product:
                                 book = db.query(Book).filter(Book.id == product.book_id).first()
 
-                        title = book.title if book else "-"
-                        publisher = book.publisher_name if book else "-"
+                        title = book.title if book else (listing.product_name or "-")
+                        publisher = (book.publisher.name if book and book.publisher else "-")
 
                         # 검색 필터
                         if search_query:
@@ -202,12 +202,11 @@ try:
                                 continue
 
                         listing_rows.append({
-                            'ISBN': listing.isbn or listing.bundle_key or '-',
+                            'ISBN': listing.isbn or '-',
                             '상품명': title[:50],
                             '판매가': f"{listing.sale_price:,}원",
-                            '배송정책': listing.shipping_policy,
-                            '업로드방식': listing.upload_method or '-',
-                            '등록일': listing.uploaded_at.strftime("%Y-%m-%d") if listing.uploaded_at else '-',
+                            '배송유형': listing.delivery_charge_type or '-',
+                            '동기화일': listing.synced_at.strftime("%Y-%m-%d") if listing.synced_at else '-',
                         })
 
                     if listing_rows:
@@ -226,11 +225,9 @@ try:
                     for product in pending:
                         book = db.query(Book).filter(Book.id == product.book_id).first()
                         title = book.title if book else "-"
-                        publisher = book.publisher_name if book else "-"
+                        publisher = (book.publisher.name if book and book.publisher else "-")
 
                         # 필터
-                        if shipping_filter != '전체' and product.shipping_policy != shipping_filter:
-                            continue
                         if search_query:
                             q = search_query.lower()
                             if q not in product.isbn.lower() and q not in title.lower():

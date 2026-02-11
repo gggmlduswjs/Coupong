@@ -40,31 +40,21 @@ def render(selected_account, accounts_df, account_names):
             COUNT(*) FILTER (WHERE coupang_status = 'active') as active_cnt,
             COUNT(*) FILTER (WHERE coupang_status != 'active') as other_cnt,
             COALESCE(SUM(CASE WHEN coupang_status = 'active' THEN sale_price ELSE 0 END), 0) as total_sale,
-            COUNT(*) FILTER (WHERE coupang_status = 'active' AND coupang_sale_price > 0 AND sale_price > 0 AND sale_price != coupang_sale_price) as price_diff_cnt,
-            COUNT(*) FILTER (WHERE coupang_status = 'active' AND stock_quantity <= 3) as low_stock_cnt,
-            COUNT(*) FILTER (WHERE coupang_status = 'active' AND winner_status = 'winner') as winner_cnt,
-            COUNT(*) FILTER (WHERE coupang_status = 'active' AND winner_status = 'not_winner') as not_winner_cnt
+            COUNT(*) FILTER (WHERE coupang_status = 'active' AND stock_quantity <= 3) as low_stock_cnt
         FROM listings
     """)
     _pub_cnt = int(query_df("SELECT COUNT(*) as c FROM publishers WHERE is_active = true").iloc[0]['c'])
     _all_active = int(_kpi.iloc[0]['active_cnt'])
     _all_other = int(_kpi.iloc[0]['other_cnt'])
     _total_sale = int(_kpi.iloc[0]['total_sale'])
-    _price_diff_cnt = int(_kpi.iloc[0]['price_diff_cnt'])
     _low_stock_cnt = int(_kpi.iloc[0]['low_stock_cnt'])
-    _winner_cnt = int(_kpi.iloc[0]['winner_cnt'])
-    _not_winner_cnt = int(_kpi.iloc[0]['not_winner_cnt'])
-    _winner_unknown_cnt = _all_active - _winner_cnt - _not_winner_cnt
 
-    c1, c2, c3, c4, c5, c6, c7, c8 = st.columns(8)
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("판매중", f"{_all_active:,}개")
     c2.metric("기타", f"{_all_other:,}개")
     c3.metric("출판사", f"{_pub_cnt}개")
     c4.metric("총 판매가", f"₩{_total_sale:,}")
-    c5.metric("가격 불일치", f"{_price_diff_cnt}건", delta=f"{_price_diff_cnt}" if _price_diff_cnt > 0 else None, delta_color="inverse")
-    c6.metric("재고 부족", f"{_low_stock_cnt}건", delta=f"{_low_stock_cnt}" if _low_stock_cnt > 0 else None, delta_color="inverse")
-    c7.metric("아이템위너", f"{_winner_cnt}건", delta=f"{_winner_cnt}" if _winner_cnt > 0 else None, delta_color="normal")
-    c8.metric("비위너", f"{_not_winner_cnt}건", delta=f"{_not_winner_cnt}" if _not_winner_cnt > 0 else None, delta_color="inverse")
+    c5.metric("재고 부족", f"{_low_stock_cnt}건", delta=f"{_low_stock_cnt}" if _low_stock_cnt > 0 else None, delta_color="inverse")
 
     # ── WING 등록현황 KPI (API 키 있는 계정만) ──
     _wing_client = create_wing_client(selected_account) if selected_account is not None else None
@@ -141,19 +131,11 @@ def render(selected_account, accounts_df, account_names):
 
         _status_counts = query_df("SELECT coupang_status, COUNT(*) as cnt FROM listings WHERE account_id = :acct_id GROUP BY coupang_status", {"acct_id": account_id})
         _sc = dict(zip(_status_counts["coupang_status"], _status_counts["cnt"])) if not _status_counts.empty else {}
-        _winner_acct = query_df("""
-            SELECT COALESCE(winner_status, 'unknown') as ws, COUNT(*) as cnt
-            FROM listings WHERE account_id = :acct_id AND coupang_status = 'active'
-            GROUP BY ws
-        """, {"acct_id": account_id})
-        _wc = dict(zip(_winner_acct["ws"], _winner_acct["cnt"])) if not _winner_acct.empty else {}
-        _k1, _k2, _k3, _k4, _k5, _k6 = st.columns(6)
+        _k1, _k2, _k3, _k4 = st.columns(4)
         _k1.metric("판매중", f"{_sc.get('active', 0):,}건")
         _k2.metric("판매중지", f"{_sc.get('paused', 0):,}건")
         _k3.metric("품절/기타", f"{_sc.get('sold_out', 0) + _sc.get('pending', 0) + _sc.get('rejected', 0):,}건")
         _k4.metric("전체", f"{sum(_sc.values()):,}건")
-        _k5.metric("위너", f"{_wc.get('winner', 0):,}건")
-        _k6.metric("비위너", f"{_wc.get('not_winner', 0):,}건")
 
         col_f1, col_f2, col_f3 = st.columns([1, 2, 1])
         with col_f1:
@@ -163,29 +145,6 @@ def render(selected_account, accounts_df, account_names):
             status_filter = _filter_map.get(_filter_label, _filter_label)
         with col_f2:
             search_q = st.text_input("검색 (상품명 / ISBN / SKU)", key="lst_search")
-        with col_f3:
-            if st.button("위너 확인", key="btn_winner_sync", help="현재 계정의 active 상품 위너 상태를 API로 확인합니다"):
-                _wc_client = create_wing_client(selected_account)
-                if _wc_client is None:
-                    st.error("WING API 키가 설정되지 않았습니다.")
-                else:
-                    from scripts.sync_item_winner import sync_account_winners as _sync_winners
-                    from app.models.account import Account as _AccModel
-                    _wc_db = SessionLocal()
-                    try:
-                        _wc_acc = _wc_db.query(_AccModel).get(account_id)
-                        if _wc_acc:
-                            _wc_prog = st.progress(0, text="위너 확인 중...")
-                            _wr = _sync_winners(_wc_db, _wc_acc, force=True)
-                            _wc_prog.progress(1.0, text="완료!")
-                            st.success(f"위너 {_wr['winner']}건 / 비위너 {_wr['not_winner']}건 / 미확인 {_wr['unknown']}건 / 에러 {_wr['error']}건")
-                            st.cache_data.clear()
-                            st.rerun()
-                    except Exception as _we:
-                        st.error(f"위너 확인 실패: {_we}")
-                    finally:
-                        _wc_db.close()
-
         where_parts = ["l.account_id = :acct_id"]
         _lst_params = {"acct_id": account_id}
         if status_filter != "전체":
@@ -204,19 +163,19 @@ def render(selected_account, accounts_df, account_names):
                    COALESCE(l.delivery_charge, 0) as 배송비,
                    COALESCE(l.stock_quantity, 10) as 재고,
                    l.coupang_status as 상태,
-                   l.winner_status as _winner_raw,
                    l.isbn as "ISBN",
                    COALESCE(l.brand, '') as 출판사,
                    COALESCE(l.coupang_product_id, '-') as "쿠팡ID",
                    COALESCE(l.vendor_item_id, '') as "VID",
-                   l.uploaded_at as 등록일,
+                   l.synced_at as 동기화일,
                    pub.supply_rate as _pub_rate,
-                   b.publisher_name as _book_pub
+                   COALESCE(pub2.name, '') as _book_pub
             FROM listings l
             LEFT JOIN publishers pub ON l.brand = pub.name
             LEFT JOIN books b ON l.isbn = b.isbn
+            LEFT JOIN publishers pub2 ON b.publisher_id = pub2.id
             WHERE {where_sql}
-            ORDER BY l.uploaded_at DESC
+            ORDER BY l.synced_at DESC NULLS LAST
         """, _lst_params)
 
         if not listings_df.empty:
@@ -343,7 +302,7 @@ def render(selected_account, accounts_df, account_names):
                 alias = _brand_alias.get(brand)
                 if alias and alias in _pub_rates:
                     return float(_pub_rates[alias])
-                # 3순위: ISBN → books.publisher_name → publishers
+                # 3순위: ISBN → books.publisher_id → publishers.name
                 book_pub = row.get("_book_pub")
                 if pd.notna(book_pub) and book_pub:
                     if book_pub in _pub_rates:
@@ -399,12 +358,8 @@ def render(selected_account, accounts_df, account_names):
                 return t or "-"
             listings_df["배송"] = listings_df.apply(_fmt_ship_type, axis=1)
 
-            # 위너 표시 컬럼
-            _winner_map = {"winner": "O", "not_winner": "X"}
-            listings_df["위너"] = listings_df["_winner_raw"].map(lambda v: _winner_map.get(v, "-"))
-
             # 그리드 표시 컬럼 순서
-            _grid_cols = ["상품명", "정가", "판매가", "순마진", "공급율", "배송", "재고", "상태", "위너", "ISBN", "출판사", "쿠팡ID", "VID", "등록일"]
+            _grid_cols = ["상품명", "정가", "판매가", "순마진", "공급율", "배송", "재고", "상태", "ISBN", "출판사", "쿠팡ID", "VID", "동기화일"]
             _grid_df = listings_df[_grid_cols]
 
             _cap_col, _dl_col = st.columns([4, 1])
@@ -416,7 +371,6 @@ def render(selected_account, accounts_df, account_names):
             gb.configure_selection(selection_mode="single", use_checkbox=False)
             gb.configure_column("상품명", minWidth=200)
             gb.configure_column("공급율", width=70)
-            gb.configure_column("위너", width=60)
             gb.configure_grid_options(domLayout="normal")
             grid_resp = AgGrid(
                 _grid_df,
@@ -431,44 +385,19 @@ def render(selected_account, accounts_df, account_names):
                 sel = selected.iloc[0] if hasattr(selected, "iloc") else pd.Series(selected[0])
 
                 st.divider()
-                # 도서 정보 조회
-                img_url, author, description = "", "", ""
-                book_match = pd.DataFrame()
-                if sel["ISBN"]:
-                    book_match = query_df("SELECT image_url, author, description FROM books WHERE isbn = :isbn LIMIT 1", {"isbn": sel["ISBN"]})
-                if book_match.empty:
-                    _sel_name = sel["상품명"] or ""
-                    if _sel_name:
-                        book_match = query_df("SELECT image_url, author, description FROM books WHERE title = :title LIMIT 1", {"title": _sel_name})
-                if not book_match.empty:
-                    img_url = book_match.iloc[0]["image_url"] or ""
-                    author = book_match.iloc[0]["author"] or ""
-                    description = book_match.iloc[0]["description"] or ""
-
                 # 상세 카드
                 pc1, pc2 = st.columns([1, 3])
                 with pc1:
-                    if img_url:
-                        try:
-                            st.image(img_url, width=180)
-                        except Exception:
-                            st.markdown('<div style="width:180px;height:240px;background:#f0f0f0;display:flex;align-items:center;justify-content:center;border-radius:8px;color:#999;font-size:48px;">📖</div>', unsafe_allow_html=True)
-                    else:
-                        st.markdown('<div style="width:180px;height:240px;background:#f0f0f0;display:flex;align-items:center;justify-content:center;border-radius:8px;color:#999;font-size:48px;">📖</div>', unsafe_allow_html=True)
+                    st.markdown('<div style="width:180px;height:240px;background:#f0f0f0;display:flex;align-items:center;justify-content:center;border-radius:8px;color:#999;font-size:48px;">📖</div>', unsafe_allow_html=True)
                 with pc2:
                     st.markdown(f"### {sel['상품명']}")
-                    if author:
-                        st.caption(f"저자: {author}")
                     dc1, dc2, dc3, dc4, dc5 = st.columns(5)
                     dc1.metric("정가", f"{int(sel['정가'] or 0):,}원")
                     dc2.metric("판매가", f"{int(sel['판매가'] or 0):,}원")
                     dc3.metric("순마진", f"{int(sel.get('순마진', 0) or 0):,}원")
                     dc4.metric("상태", sel["상태"])
                     dc5.metric("쿠팡ID", sel["쿠팡ID"] or "-")
-                    st.markdown(f"**ISBN:** `{sel['ISBN'] or '-'}`  |  **VID:** `{sel['VID'] or '-'}`  |  **등록일:** {sel['등록일'] or '-'}")
-                    if description:
-                        with st.expander("상품 설명"):
-                            st.markdown(description[:500])
+                    st.markdown(f"**ISBN:** `{sel['ISBN'] or '-'}`  |  **VID:** `{sel['VID'] or '-'}`  |  **동기화:** {sel['동기화일'] or '-'}")
 
                 # ── 실시간 조회 (WING API) ──
                 _sel_vid = sel["VID"] or ""
@@ -605,30 +534,31 @@ def render(selected_account, accounts_df, account_names):
 
         st.divider()
 
-        # ── 가격 불일치 목록 ──
+        # ── 가격 불일치 목록 (리스팅 실제가 vs 상품 기준가) ──
         st.markdown("#### 가격 불일치")
         _price_diff_df = query_df("""
             SELECT l.id, COALESCE(l.product_name, '(미등록)') as 상품명,
-                   l.sale_price as 판매가, l.coupang_sale_price as 쿠팡가,
-                   (l.sale_price - l.coupang_sale_price) as 차이,
+                   p.sale_price as 기준가, l.sale_price as 쿠팡가,
+                   (p.sale_price - l.sale_price) as 차이,
                    COALESCE(l.vendor_item_id, '') as "VID",
                    l.isbn as "ISBN"
             FROM listings l
+            JOIN products p ON l.product_id = p.id
             WHERE l.account_id = :acct_id
               AND l.coupang_status = 'active'
-              AND l.coupang_sale_price > 0 AND l.sale_price > 0
-              AND l.sale_price != l.coupang_sale_price
-            ORDER BY ABS(l.sale_price - l.coupang_sale_price) DESC
+              AND l.sale_price > 0 AND p.sale_price > 0
+              AND l.sale_price != p.sale_price
+            ORDER BY ABS(p.sale_price - l.sale_price) DESC
         """, {"acct_id": account_id})
 
         if not _price_diff_df.empty:
             st.caption(f"{len(_price_diff_df)}건의 가격 불일치 발견")
-            _pd_gb = GridOptionsBuilder.from_dataframe(_price_diff_df[["상품명", "판매가", "쿠팡가", "차이", "VID"]])
+            _pd_gb = GridOptionsBuilder.from_dataframe(_price_diff_df[["상품명", "기준가", "쿠팡가", "차이", "VID"]])
             _pd_gb.configure_selection(selection_mode="multiple", use_checkbox=True)
             _pd_gb.configure_column("상품명", headerCheckboxSelection=True)
             _pd_gb.configure_grid_options(domLayout="normal")
             _pd_grid = AgGrid(
-                _price_diff_df[["상품명", "판매가", "쿠팡가", "차이", "VID"]],
+                _price_diff_df[["상품명", "기준가", "쿠팡가", "차이", "VID"]],
                 gridOptions=_pd_gb.build(),
                 update_on=["selectionChanged"],
                 height=300,
@@ -655,10 +585,10 @@ def render(selected_account, accounts_df, account_names):
                                 continue
                             # 원본 DF에서 판매가 찾기
                             _pr_match = _price_diff_df[_price_diff_df["VID"] == _pr_vid]
-                            _pr_target = int(_pr_match.iloc[0]["판매가"]) if not _pr_match.empty else int(_pr.get("판매가", 0))
+                            _pr_target = int(_pr_match.iloc[0]["기준가"]) if not _pr_match.empty else int(_pr.get("기준가", 0))
                             try:
                                 _wing_client.update_price(int(_pr_vid), _pr_target, dashboard_override=True)
-                                run_sql("UPDATE listings SET coupang_sale_price=:sp WHERE account_id=:aid AND vendor_item_id=:vid",
+                                run_sql("UPDATE listings SET sale_price=:sp WHERE account_id=:aid AND vendor_item_id=:vid",
                                         {"sp": _pr_target, "aid": account_id, "vid": _pr_vid})
                                 _pd_ok += 1
                             except CoupangWingError as e:
@@ -753,15 +683,15 @@ def render(selected_account, accounts_df, account_names):
 
         # 전체 ready 상품 + 계정별 등록 현황
         ready = query_df("""
-            SELECT p.id as product_id, b.title, b.author, b.publisher_name,
-                   b.isbn, b.image_url, b.list_price, p.sale_price, p.net_margin,
-                   p.shipping_policy, p.supply_rate, b.year, b.description,
+            SELECT p.id as product_id, b.title, pub.name as publisher_name,
+                   b.isbn, b.list_price, p.sale_price, p.net_margin,
+                   p.shipping_policy, p.supply_rate, b.year,
                    COALESCE(b.sales_point, 0) as sales_point,
-                   COALESCE(p.registration_status, 'approved') as registration_status,
                    COALESCE(lc.listed_count, 0) as listed_count,
                    COALESCE(lc.listed_accounts, '') as listed_accounts
             FROM products p
             JOIN books b ON p.book_id = b.id
+            LEFT JOIN publishers pub ON b.publisher_id = pub.id
             LEFT JOIN (
                 SELECT COALESCE(l.isbn, l.product_name) as match_key,
                        COUNT(DISTINCT l.account_id) as listed_count,
@@ -804,16 +734,13 @@ def render(selected_account, accounts_df, account_names):
             ready["ship_changed"] = ready["shipping_policy"] != ready["calc_ship"]
 
         _all_listed_cnt = len(ready[ready["listed_count"] >= _wing_account_cnt]) if not ready.empty else 0
+        _ready_cnt = len(ready) if not ready.empty else 0
+        _unlisted_cnt = _ready_cnt - _all_listed_cnt
 
-        pending_cnt = len(ready[ready["registration_status"] == "pending_review"]) if not ready.empty else 0
-        approved_cnt = len(ready[ready["registration_status"] == "approved"]) if not ready.empty else 0
-        rejected_cnt = len(ready[ready["registration_status"] == "rejected"]) if not ready.empty else 0
-
-        k1, k2, k3, k4 = st.columns(4)
-        k1.metric("등록 가능 (승인)", f"{approved_cnt}건")
-        k2.metric("검토 대기", f"{pending_cnt}건")
-        k3.metric("거부됨", f"{rejected_cnt}건")
-        k4.metric(f"전 계정 등록 완료", f"{_all_listed_cnt}건")
+        k1, k2, k3 = st.columns(3)
+        k1.metric("등록 가능", f"{_ready_cnt}건")
+        k2.metric("미등록 계정 있음", f"{_unlisted_cnt}건")
+        k3.metric(f"전 계정 등록 완료", f"{_all_listed_cnt}건")
 
         # DB 배송정책 불일치 일괄 반영
         ship_changed_cnt = int(ready["ship_changed"].sum()) if not ready.empty and "ship_changed" in ready.columns else 0
@@ -867,25 +794,19 @@ def render(selected_account, accounts_df, account_names):
             st.info("등록 가능한 신규 상품이 없습니다. 알라딘 크롤링을 해보세요.")
             st.stop()
 
-        # 필터 (승인 상태 + 출판사 + 최소 마진 + 등록 완료 제외)
-        cf1, cf2, cf3, cf4 = st.columns([1, 1, 1, 1])
+        # 필터 (출판사 + 최소 마진 + 등록 완료 제외)
+        cf1, cf2, cf3 = st.columns([1, 1, 1])
         with cf1:
-            status_options = ["전체", "검토 대기", "승인됨", "거부됨"]
-            status_f = st.selectbox("등록 상태", status_options, key="nr_status")
-        with cf2:
             pubs = ["전체"] + sorted(ready["publisher_name"].dropna().unique().tolist())
             pub_f = st.selectbox("출판사", pubs, key="nr_pub")
-        with cf3:
+        with cf2:
             min_m = st.number_input("최소 마진(원)", value=0, step=500, key="nr_mm")
-        with cf4:
+        with cf3:
             hide_full = st.checkbox("전 계정 등록 완료 숨김", value=True, key="nr_hide_full")
 
-        _status_map = {"검토 대기": "pending_review", "승인됨": "approved", "거부됨": "rejected"}
         filtered = ready.copy()
         if hide_full:
             filtered = filtered[filtered["listed_count"] < _wing_account_cnt]
-        if status_f != "전체":
-            filtered = filtered[filtered["registration_status"] == _status_map[status_f]]
         if pub_f != "전체":
             filtered = filtered[filtered["publisher_name"] == pub_f]
         if min_m > 0:
@@ -901,11 +822,8 @@ def render(selected_account, accounts_df, account_names):
         with ba1:
             st.markdown(f"**조회: {len(filtered)}건**")
 
-        # ── 상품 테이블 (AgGrid: 체크박스 + 등록상태) ──
+        # ── 상품 테이블 (AgGrid) ──
         display = filtered.copy()
-
-        _status_label = {"pending_review": "검토 대기", "approved": "승인", "rejected": "거부"}
-        display["등록상태"] = display["registration_status"].map(_status_label).fillna("검토 대기")
 
         def _ship_display(row):
             """배송비 표시: 무료 / 조건부(X원/Y만↑무료)"""
@@ -937,7 +855,7 @@ def render(selected_account, accounts_df, account_names):
         display["등록"] = display.apply(_fmt_listed, axis=1)
 
         display["판매지수"] = display["sales_point"].astype(int) if "sales_point" in display.columns else 0
-        nr_grid_df = display[["title", "publisher_name", "list_price", "sale_price", "순마진", "판매지수", "공급율", "배송", "등록상태", "등록", "isbn", "year"]].rename(columns={
+        nr_grid_df = display[["title", "publisher_name", "list_price", "sale_price", "순마진", "판매지수", "공급율", "배송", "등록", "isbn", "year"]].rename(columns={
             "title": "제목", "publisher_name": "출판사", "isbn": "ISBN",
             "list_price": "정가", "sale_price": "판매가", "year": "연도",
         })
@@ -947,7 +865,6 @@ def render(selected_account, accounts_df, account_names):
         nr_gb.configure_column("판매지수", width=80, sort="desc")
         nr_gb.configure_column("공급율", width=70)
         nr_gb.configure_column("배송", width=100)
-        nr_gb.configure_column("등록상태", width=80)
         nr_gb.configure_column("등록", minWidth=150)
         nr_gb.configure_grid_options(domLayout="normal", suppressRowClickSelection=True)
         _nr_grid_ver = st.session_state.get("nr_grid_ver", 0)
@@ -979,34 +896,13 @@ def render(selected_account, accounts_df, account_names):
             if _row_data and isinstance(_row_data, dict) and _row_data.get("제목"):
                 st.session_state["nr_detail_title"] = _row_data["제목"]
 
-        # ── 일괄 승인/거부 버튼 ──
         st.markdown(f"**선택: {sel_cnt}건**")
-        ap1, ap2, ap3, ap4 = st.columns([1, 1, 1, 3])
+        ap1, ap2 = st.columns([1, 5])
         with ap1:
-            btn_bulk_approve = st.button("일괄 승인", type="primary", disabled=(sel_cnt == 0), key="btn_bulk_approve")
-        with ap2:
-            btn_bulk_reject = st.button("일괄 거부", disabled=(sel_cnt == 0), key="btn_bulk_reject")
-        with ap3:
             if st.button("선택 초기화", disabled=(sel_cnt == 0), key="btn_nr_clear"):
                 st.session_state["nr_sel_titles"] = []
                 st.session_state["nr_grid_ver"] = _nr_grid_ver + 1
                 st.rerun()
-
-        if btn_bulk_approve and sel_cnt > 0:
-            pids = [int(display.iloc[i]["product_id"]) for i in sel_idx]
-            placeholders = ",".join(str(p) for p in pids)
-            run_sql(f"UPDATE products SET registration_status = 'approved' WHERE id IN ({placeholders})")
-            st.success(f"{sel_cnt}건 승인 완료")
-            st.cache_data.clear()
-            st.rerun()
-
-        if btn_bulk_reject and sel_cnt > 0:
-            pids = [int(display.iloc[i]["product_id"]) for i in sel_idx]
-            placeholders = ",".join(str(p) for p in pids)
-            run_sql(f"UPDATE products SET registration_status = 'rejected' WHERE id IN ({placeholders})")
-            st.success(f"{sel_cnt}건 거부 완료")
-            st.cache_data.clear()
-            st.rerun()
 
         # ── 행 클릭 → 상세 보기 ──
         _detail_title = st.session_state.get("nr_detail_title")
@@ -1014,24 +910,15 @@ def render(selected_account, accounts_df, account_names):
             _match = display[display["title"] == _detail_title]
             if not _match.empty:
                 nr_sel = _match.iloc[0]
-                book_id_row = query_df("SELECT id, image_url, description, author FROM books WHERE isbn = :isbn LIMIT 1", {"isbn": nr_sel["isbn"]}) if nr_sel["isbn"] else pd.DataFrame()
+                book_id_row = query_df("SELECT id FROM books WHERE isbn = :isbn LIMIT 1", {"isbn": nr_sel["isbn"]}) if nr_sel["isbn"] else pd.DataFrame()
 
                 st.divider()
                 pv1, pv2 = st.columns([1, 3])
                 with pv1:
-                    img = book_id_row.iloc[0]["image_url"] if not book_id_row.empty and book_id_row.iloc[0]["image_url"] else ""
-                    if img:
-                        try:
-                            st.image(img, width=150)
-                        except Exception:
-                            st.markdown('<div style="width:150px;height:200px;background:#f0f0f0;display:flex;align-items:center;justify-content:center;border-radius:8px;color:#999;font-size:40px;">📖</div>', unsafe_allow_html=True)
-                    else:
-                        st.markdown('<div style="width:150px;height:200px;background:#f0f0f0;display:flex;align-items:center;justify-content:center;border-radius:8px;color:#999;font-size:40px;">📖</div>', unsafe_allow_html=True)
+                    st.markdown('<div style="width:150px;height:200px;background:#f0f0f0;display:flex;align-items:center;justify-content:center;border-radius:8px;color:#999;font-size:40px;">📖</div>', unsafe_allow_html=True)
                 with pv2:
                     st.markdown(f"**{nr_sel['title']}**")
-                    author = book_id_row.iloc[0]["author"] if not book_id_row.empty else ""
-                    _cur_status = nr_sel.get("등록상태", "검토 대기")
-                    st.markdown(f"{author or ''} | {nr_sel['publisher_name']} | ISBN: `{nr_sel['isbn']}` | 상태: **{_cur_status}**")
+                    st.markdown(f"{nr_sel['publisher_name']} | ISBN: `{nr_sel['isbn']}`")
                     _detail_net = int(nr_sel.get('calc_net', nr_sel.get('net_margin', 0)) or 0)
                     st.markdown(f"정가 {int(nr_sel['list_price']):,}원 → 판매가 {int(nr_sel['sale_price']):,}원 | 순마진 **{_detail_net:,}원**")
                     # 등록된 계정 표시
@@ -1042,37 +929,14 @@ def render(selected_account, accounts_df, account_names):
                     else:
                         st.markdown(f"등록 계정: 없음 (0/{_wing_account_cnt})")
 
-                    # 개별 승인/거부 버튼
-                    _pid = int(nr_sel["product_id"])
-                    iv1, iv2, iv3 = st.columns([1, 1, 4])
-                    with iv1:
-                        if st.button("승인", type="primary", key=f"approve_{_pid}"):
-                            run_sql("UPDATE products SET registration_status = 'approved' WHERE id = :id", {"id": _pid})
-                            st.success("승인 완료")
-                            st.cache_data.clear()
-                            st.rerun()
-                    with iv2:
-                        if st.button("거부", key=f"reject_{_pid}"):
-                            run_sql("UPDATE products SET registration_status = 'rejected' WHERE id = :id", {"id": _pid})
-                            st.success("거부 완료")
-                            st.cache_data.clear()
-                            st.rerun()
-
                 with st.expander("수정 / 삭제"):
                     bid = int(book_id_row.iloc[0]["id"]) if not book_id_row.empty else None
                     pid = int(nr_sel["product_id"])
                     if bid:
-                        _bk = book_id_row.iloc[0]
                         with st.form("nr_edit_form"):
                             # 1행: 제목
                             ed_title = st.text_input("제목", value=nr_sel["title"] or "")
-                            # 2행: 저자 / 출판사
-                            _er1, _er2 = st.columns(2)
-                            with _er1:
-                                ed_author = st.text_input("저자", value=_bk.get("author", "") or "")
-                            with _er2:
-                                ed_publisher = st.text_input("출판사", value=nr_sel.get("publisher_name", "") or "")
-                            # 3행: 판매가 / 정가 / 배송
+                            # 2행: 판매가 / 정가 / 배송
                             ed1, ed2, ed3 = st.columns(3)
                             with ed1:
                                 ed_sale = st.number_input("판매가", value=int(nr_sel["sale_price"]), step=100)
@@ -1081,18 +945,13 @@ def render(selected_account, accounts_df, account_names):
                             with ed3:
                                 ed_ship = st.selectbox("배송", ["free", "paid"],
                                                        index=0 if nr_sel["shipping_policy"] == "free" else 1)
-                            # 4행: 이미지 URL
-                            ed_image = st.text_input("이미지 URL", value=_bk.get("image_url", "") or "")
-                            # 5행: 상품 설명
-                            ed_desc = st.text_area("상품 설명", value=_bk.get("description", "") or "", height=100)
 
                             if st.form_submit_button("저장", type="primary"):
                                 try:
                                     # books 테이블 업데이트
                                     run_sql(
-                                        "UPDATE books SET title=:t, author=:a, publisher_name=:pub, list_price=:lp, image_url=:img, description=:desc WHERE id=:id",
-                                        {"t": ed_title, "a": ed_author, "pub": ed_publisher,
-                                         "lp": ed_price, "img": ed_image, "desc": ed_desc, "id": bid}
+                                        "UPDATE books SET title=:t, list_price=:lp WHERE id=:id",
+                                        {"t": ed_title, "lp": ed_price, "id": bid}
                                     )
                                     # products 테이블 업데이트 (마진 재계산)
                                     _sr = float(nr_sel.get("supply_rate", 0.65) or 0.65)
@@ -1123,9 +982,10 @@ def render(selected_account, accounts_df, account_names):
         st.divider()
 
         # ── 등록 매트릭스 프리뷰 + 일괄 등록 ──
-        _approved_sel_idx = [i for i in sel_idx if display.iloc[i].get("registration_status") == "approved"]
+        # 모든 선택된 상품은 등록 가능 (registration_status 삭제됨)
+        _approved_sel_idx = sel_idx
         _approved_cnt = len(_approved_sel_idx)
-        _unapproved_cnt = sel_cnt - _approved_cnt
+        _unapproved_cnt = 0
 
         st.subheader("일괄 등록")
 
@@ -1242,20 +1102,20 @@ def render(selected_account, accounts_df, account_names):
                                     with engine.connect() as conn:
                                         conn.execute(text("""
                                             INSERT INTO listings
-                                            (account_id, product_type, product_id, isbn, coupang_product_id,
+                                            (account_id, product_id, isbn, coupang_product_id,
                                              coupang_status, sale_price, original_price, product_name,
-                                             shipping_policy, upload_method, uploaded_at,
-                                             stock_quantity, delivery_charge_type, delivery_charge, free_ship_over_amount)
-                                            VALUES (:aid, 'single', :pid, :isbn, :cid, 'active', :sp, :op, :pn, :ship, 'api', :now,
-                                                    :stock, :dct, :dc, :fsoa)
+                                             stock_quantity, delivery_charge_type, delivery_charge, free_ship_over_amount,
+                                             synced_at)
+                                            VALUES (:aid, :pid, :isbn, :cid, 'active', :sp, :op, :pn,
+                                                    :stock, :dct, :dc, :fsoa, :now)
                                             ON CONFLICT DO NOTHING
                                         """), {
                                             "aid": int(_acc["id"]), "pid": int(row["product_id"]),
                                             "isbn": pd_data["isbn"], "cid": sid,
                                             "sp": pd_data["sale_price"], "op": pd_data["original_price"],
-                                            "pn": name, "ship": pd_data["shipping_policy"],
-                                            "now": datetime.now().isoformat(),
+                                            "pn": name,
                                             "stock": DEFAULT_STOCK, "dct": _dct, "dc": _dc, "fsoa": _fsoa,
+                                            "now": datetime.now().isoformat(),
                                         })
                                         # 이번 등록 반영 → 전 계정 완료 여부 체크
                                         _row_listed.add(_acc_name)
@@ -1596,17 +1456,17 @@ def render(selected_account, accounts_df, account_names):
             if _isbn_btn and _isbn_input:
                 _isbn_input = _isbn_input.strip()
                 _db_book = query_df(
-                    "SELECT title, author, publisher_name, list_price, image_url, description FROM books WHERE isbn = :isbn LIMIT 1",
+                    "SELECT b.title, pub.name as publisher_name, b.list_price FROM books b LEFT JOIN publishers pub ON b.publisher_id = pub.id WHERE b.isbn = :isbn LIMIT 1",
                     {"isbn": _isbn_input}
                 )
                 if not _db_book.empty:
                     _row = _db_book.iloc[0]
                     st.session_state["m_title"] = _row["title"] or ""
-                    st.session_state["m_author"] = _row["author"] or ""
+                    st.session_state["m_author"] = ""
                     st.session_state["m_publisher"] = _row["publisher_name"] or ""
                     st.session_state["m_list_price"] = int(_row["list_price"]) if pd.notna(_row["list_price"]) else 0
-                    st.session_state["m_image"] = _row["image_url"] or ""
-                    st.session_state["m_desc"] = _row["description"] or ""
+                    st.session_state["m_image"] = ""
+                    st.session_state["m_desc"] = ""
                     st.session_state["m_isbn"] = _isbn_input
                     st.success(f"DB에서 찾음: {_row['title']}")
                 else:
@@ -1623,7 +1483,7 @@ def render(selected_account, accounts_df, account_names):
                                 st.session_state["m_author"] = _result.get("author", "")
                                 st.session_state["m_publisher"] = _result.get("publisher", "")
                                 st.session_state["m_list_price"] = _result.get("original_price", 0)
-                                st.session_state["m_image"] = _result.get("image_url", "")
+                                st.session_state["m_image"] = ""  # image_url deleted from Book model
                                 st.session_state["m_desc"] = _result.get("description", "")
                                 st.session_state["m_isbn"] = _isbn_input
                                 st.success(f"알라딘에서 찾음: {_result['title']}")
@@ -2012,12 +1872,12 @@ def render(selected_account, accounts_df, account_names):
                                 with engine.connect() as conn:
                                     conn.execute(text("""
                                         INSERT INTO listings
-                                        (account_id, product_type, isbn, coupang_product_id,
+                                        (account_id, isbn, coupang_product_id,
                                          coupang_status, sale_price, original_price, product_name,
-                                         shipping_policy, upload_method, uploaded_at,
-                                         stock_quantity, delivery_charge_type, delivery_charge, free_ship_over_amount)
-                                        VALUES (:aid, 'single', :isbn, :cid, 'active', :sp, :op, :pn, :ship, 'api', :now,
-                                                :stock, :dct, :dc, :fsoa)
+                                         stock_quantity, delivery_charge_type, delivery_charge, free_ship_over_amount,
+                                         synced_at)
+                                        VALUES (:aid, :isbn, :cid, 'active', :sp, :op, :pn,
+                                                :stock, :dct, :dc, :fsoa, :now)
                                         ON CONFLICT DO NOTHING
                                     """), {
                                         "aid": int(_acc["id"]),
@@ -2026,9 +1886,8 @@ def render(selected_account, accounts_df, account_names):
                                         "sp": _m_sale_price,
                                         "op": _m_list_price,
                                         "pn": _m_title,
-                                        "ship": _shipping_policy,
-                                        "now": datetime.now().isoformat(),
                                         "stock": DEFAULT_STOCK, "dct": _m_dct, "dc": _m_dc, "fsoa": _m_fsoa,
+                                        "now": datetime.now().isoformat(),
                                     })
                                     conn.commit()
                             except Exception as _db_e:

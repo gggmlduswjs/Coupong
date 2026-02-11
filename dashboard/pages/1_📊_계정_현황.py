@@ -74,24 +74,23 @@ try:
             if product:
                 book = db.query(Book).filter(Book.id == product.book_id).first()
 
-        if book:
-            publisher_name = book.publisher_name or "기타"
+        if book and book.publisher:
+            publisher_name = book.publisher.name or "기타"
 
         publishers.append(publisher_name)
-        shipping_policies.append(listing.shipping_policy or "unknown")
+        shipping_policies.append(listing.delivery_charge_type or "unknown")
 
-        if listing.uploaded_at:
-            upload_months.append(listing.uploaded_at.strftime("%Y-%m"))
+        if listing.synced_at:
+            upload_months.append(listing.synced_at.strftime("%Y-%m"))
 
         listing_details.append({
-            'ISBN': listing.isbn or listing.bundle_key or '-',
-            '상품명': book.title[:50] if book else '-',
+            'ISBN': listing.isbn or '-',
+            '상품명': book.title[:50] if book else (listing.product_name or '-')[:50],
             '판매가': listing.sale_price,
-            '배송정책': listing.shipping_policy or '-',
+            '배송유형': listing.delivery_charge_type or '-',
             '상태': listing.coupang_status,
-            '업로드방식': listing.upload_method or '-',
             '출판사': publisher_name,
-            '등록일': listing.uploaded_at.strftime("%Y-%m-%d") if listing.uploaded_at else '-',
+            '동기화일': listing.synced_at.strftime("%Y-%m-%d") if listing.synced_at else '-',
         })
 
     # =============================================
@@ -117,40 +116,40 @@ try:
             fig.update_layout(height=400)
             st.plotly_chart(fig, width="stretch")
 
-    # 배송정책별 분포
+    # 배송유형별 분포
     with chart_col2:
-        st.subheader("배송정책별 분포")
+        st.subheader("배송유형별 분포")
         ship_counts = Counter(shipping_policies)
         if ship_counts:
             ship_df = pd.DataFrame(
                 list(ship_counts.items()),
-                columns=['배송정책', '상품수']
+                columns=['배송유형', '상품수']
             )
             fig = px.pie(
-                ship_df, names='배송정책', values='상품수',
-                title="배송정책별 비율",
+                ship_df, names='배송유형', values='상품수',
+                title="배송유형별 비율",
                 color_discrete_sequence=px.colors.qualitative.Set2
             )
             fig.update_layout(height=400)
             st.plotly_chart(fig, width="stretch")
 
-    # 월별 등록 추이
-    st.subheader("월별 등록 추이")
+    # 월별 동기화 추이
+    st.subheader("월별 동기화 추이")
     if upload_months:
         month_counts = Counter(upload_months)
         month_df = pd.DataFrame(
             sorted(month_counts.items()),
-            columns=['월', '등록수']
+            columns=['월', '동기화수']
         )
         fig = px.line(
-            month_df, x='월', y='등록수',
-            title="월별 상품 등록 추이",
+            month_df, x='월', y='동기화수',
+            title="월별 상품 동기화 추이",
             markers=True
         )
         fig.update_layout(height=350)
         st.plotly_chart(fig, width="stretch")
     else:
-        st.info("등록일 데이터가 없습니다.")
+        st.info("동기화 데이터가 없습니다.")
 
     # =============================================
     # 상세 테이블
@@ -169,8 +168,8 @@ try:
         )
     with filter_col3:
         ship_filter = st.selectbox(
-            "배송정책",
-            ['전체', 'free', 'paid'],
+            "배송유형",
+            ['전체', 'FREE', 'NOT_FREE', 'CONDITIONAL_FREE'],
             key="ship_detail_filter"
         )
 
@@ -182,7 +181,7 @@ try:
     if pub_filter != '전체':
         filtered = [r for r in filtered if r['출판사'] == pub_filter]
     if ship_filter != '전체':
-        filtered = [r for r in filtered if r['배송정책'] == ship_filter]
+        filtered = [r for r in filtered if r['배송유형'] == ship_filter]
 
     if filtered:
         df = pd.DataFrame(filtered)

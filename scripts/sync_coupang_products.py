@@ -33,8 +33,7 @@ os.chdir(project_root)
 from dotenv import load_dotenv
 load_dotenv()
 
-from sqlalchemy import inspect, text
-from app.database import SessionLocal, init_db, engine
+from app.database import SessionLocal, init_db
 from app.models.account import Account
 from app.models.listing import Listing
 from app.api.coupang_wing_client import CoupangWingClient, CoupangWingError
@@ -49,73 +48,62 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def _extract_isbn(product_data: dict) -> str:
+def _extract_isbns(product_data: dict) -> list:
     """
-    쿠팡 상품 데이터에서 ISBN 추출
-
-    우선순위:
-    1. items[].attributes에서 ISBN 필드 (가장 정확)
-    2. items[].barcode (바코드에 ISBN 13자리)
-    3. items[].searchTags에서 ISBN 패턴
-    4. sellerProductName에서 ISBN 패턴
+    쿠팡 상품 데이터에서 ISBN 복수 추출
 
     Returns:
-        ISBN 문자열 또는 빈 문자열
+        ISBN 문자열 리스트 (정렬됨)
     """
     isbn_pattern = re.compile(r'97[89]\d{10}')
+    found = set()
     items = product_data.get("items", [])
 
-    # 1) items[].attributes에서 ISBN 추출 (가장 정확)
     for item in items:
+        # 1) items[].attributes에서 ISBN 추출 (가장 정확)
         attributes = item.get("attributes", [])
         if isinstance(attributes, list):
             for attr in attributes:
                 attr_name = attr.get("attributeTypeName", "")
                 attr_value = attr.get("attributeValueName", "")
                 if attr_name == "ISBN" and attr_value and "상세" not in attr_value:
-                    # ISBN 값이 숫자로만 구성되어 있는지 확인
                     cleaned = re.sub(r'[^0-9]', '', attr_value)
                     if len(cleaned) == 13 and cleaned.startswith(("978", "979")):
-                        return cleaned
+                        found.add(cleaned)
 
-    # 2) items의 barcode에서 검색
-    for item in items:
+        # 2) items의 barcode에서 검색
         barcode = str(item.get("barcode", ""))
-        match = isbn_pattern.search(barcode)
-        if match:
-            return match.group()
+        for match in isbn_pattern.finditer(barcode):
+            found.add(match.group())
 
-    # 3) items의 vendorItemName 또는 searchTags에서 검색
-    for item in items:
-        # searchTags
+        # 3) items의 searchTags에서 검색
         search_tags = item.get("searchTags", [])
         if isinstance(search_tags, list):
             for tag in search_tags:
-                match = isbn_pattern.search(str(tag))
-                if match:
-                    return match.group()
+                for match in isbn_pattern.finditer(str(tag)):
+                    found.add(match.group())
 
-        # vendorItemName
+        # 4) vendorItemName
         vendor_name = str(item.get("vendorItemName", ""))
-        match = isbn_pattern.search(vendor_name)
-        if match:
-            return match.group()
+        for match in isbn_pattern.finditer(vendor_name):
+            found.add(match.group())
 
-    # 4) sellerProductName에서 검색
+    # 5) sellerProductName에서 검색
     product_name = str(product_data.get("sellerProductName", ""))
-    match = isbn_pattern.search(product_name)
-    if match:
-        return match.group()
+    for match in isbn_pattern.finditer(product_name):
+        found.add(match.group())
 
-    return ""
+    return sorted(found)
 
 
-def _get_vendor_item_id(product_data: dict) -> str:
-    """상품 데이터에서 vendorItemId 추출"""
+def _get_vendor_item_id(product_data: dict) -> int:
+    """상품 데이터에서 vendorItemId 추출 (BigInteger)"""
     items = product_data.get("items", [])
     if items:
-        return str(items[0].get("vendorItemId", ""))
-    return ""
+        vid = items[0].get("vendorItemId")
+        if vid:
+            return int(vid)
+    return None
 
 
 def _get_product_status(product_data: dict) -> str:
@@ -159,22 +147,9 @@ def _parse_detail_fields(detail_data: dict) -> dict:
     items = detail_data.get("items", [])
     if items:
         item = items[0]
-        result["maximum_buy_count"] = item.get("maximumBuyCount", None)
         result["supply_price"] = item.get("supplyPrice", None)
         result["original_price"] = item.get("originalPrice", None)
         result["sale_price"] = item.get("salePrice", None)
-
-        # 아이템 위너 정보
-        winner_raw = item.get("winner")
-        if winner_raw is True:
-            result["winner_status"] = "winner"
-        elif winner_raw is False:
-            result["winner_status"] = "not_winner"
-        else:
-            result["winner_status"] = None
-
-        # 아이템 ID (vendorItemId와 별개의 productId)
-        result["item_id"] = str(item.get("itemId", "")) or None
 
         # attributes에서 ISBN, 출판사 추출
         result["isbn"] = None
@@ -191,12 +166,9 @@ def _parse_detail_fields(detail_data: dict) -> dict:
                 elif attr_name == "출판사" and attr_value and "상세" not in attr_value:
                     result["publisher"] = attr_value
     else:
-        result["maximum_buy_count"] = None
         result["supply_price"] = None
         result["original_price"] = None
         result["sale_price"] = None
-        result["winner_status"] = None
-        result["item_id"] = None
         result["isbn"] = None
         result["publisher"] = None
 
@@ -220,10 +192,10 @@ def _safe_commit(db):
     db.commit()
 
 
-def _fetch_product_detail(client: CoupangWingClient, seller_product_id: str) -> dict:
+def _fetch_product_detail(client: CoupangWingClient, seller_product_id: int) -> dict:
     """상품 상세 조회 (1회 재시도 포함)"""
     try:
-        result = client.get_product(int(seller_product_id))
+        result = client.get_product(seller_product_id)
         # 응답에서 data 키 확인
         if isinstance(result, dict) and "data" in result:
             return result["data"] if isinstance(result["data"], dict) else result
@@ -234,7 +206,7 @@ def _fetch_product_detail(client: CoupangWingClient, seller_product_id: str) -> 
             logger.warning(f"    Rate limit, 1초 대기 후 재시도: {seller_product_id}")
             time.sleep(1)
             try:
-                result = client.get_product(int(seller_product_id))
+                result = client.get_product(seller_product_id)
                 if isinstance(result, dict) and "data" in result:
                     return result["data"] if isinstance(result["data"], dict) else result
                 return result
@@ -249,15 +221,6 @@ def sync_account_products(
 ) -> dict:
     """
     단일 계정의 상품을 WING API로 조회하여 DB에 동기화
-
-    Args:
-        db: SQLAlchemy 세션
-        account: 계정 모델
-        max_pages: 목록 API 최대 페이지 수 (0=무제한)
-        dry_run: True면 DB 저장 없이 조회만
-        quick: True면 Stage 1만 (목록만)
-        force: True면 모든 상품 상세 강제 재조회
-        stale_hours: 상세 재조회 기준 시간 (기본 24)
 
     Returns:
         {"total", "new", "updated", "isbn_found", "isbn_missing", "detail_synced", "detail_skipped", "detail_error"}
@@ -290,24 +253,24 @@ def sync_account_products(
 
     if dry_run:
         for product_data in products:
-            isbn = _extract_isbn(product_data)
-            if isbn:
+            isbns = _extract_isbns(product_data)
+            if isbns:
                 result["isbn_found"] += 1
             else:
                 result["isbn_missing"] += 1
         logger.info(f"  [DRY-RUN] ISBN 추출: {result['isbn_found']}개 성공, {result['isbn_missing']}개 실패")
         return result
 
-    # 기존 listings를 한번에 로드 → dict로 룩업
+    # 기존 listings를 한번에 로드 → dict로 룩업 (BigInteger 키)
     existing_listings = db.query(Listing).filter(
         Listing.account_id == account.id
     ).all()
 
-    by_product_id = {}  # coupang_product_id → Listing
+    by_product_id = {}  # coupang_product_id(int) → Listing
     by_isbn = {}        # isbn → Listing
     for lst in existing_listings:
         if lst.coupang_product_id:
-            by_product_id[lst.coupang_product_id] = lst
+            by_product_id[int(lst.coupang_product_id)] = lst
         if lst.isbn:
             by_isbn[lst.isbn] = lst
 
@@ -317,21 +280,22 @@ def sync_account_products(
     new_listings = []
 
     for product_data in products:
-        seller_product_id = str(product_data.get("sellerProductId", ""))
-        isbn = _extract_isbn(product_data)
+        seller_product_id = int(product_data.get("sellerProductId", 0))
+        isbns = _extract_isbns(product_data)
+        isbn_str = ",".join(isbns) if isbns else None
         vendor_item_id = _get_vendor_item_id(product_data)
         coupang_status = _get_product_status(product_data)
         product_name = product_data.get("sellerProductName", "")
 
-        if isbn:
+        if isbns:
             result["isbn_found"] += 1
         else:
             result["isbn_missing"] += 1
 
         # dict 룩업 (DB 쿼리 없음)
         existing = by_product_id.get(seller_product_id)
-        if not existing and isbn:
-            existing = by_isbn.get(isbn)
+        if not existing and isbn_str:
+            existing = by_isbn.get(isbn_str)
 
         # 가격 추출
         items = product_data.get("items", [])
@@ -348,13 +312,12 @@ def sync_account_products(
             if vendor_item_id:
                 existing.vendor_item_id = vendor_item_id
             if sale_price:
-                existing.coupang_sale_price = sale_price
                 existing.sale_price = sale_price
             if original_price:
                 existing.original_price = original_price
-            if isbn and not existing.isbn:
-                existing.isbn = isbn
-            existing.last_checked_at = now
+            if isbn_str and not existing.isbn:
+                existing.isbn = isbn_str
+            existing.synced_at = now
             result["updated"] += 1
             # 새로 등록된 product_id도 룩업에 반영
             if seller_product_id:
@@ -362,25 +325,22 @@ def sync_account_products(
         else:
             listing = Listing(
                 account_id=account.id,
-                product_type="single",
-                isbn=isbn if isbn else None,
                 coupang_product_id=seller_product_id,
+                vendor_item_id=vendor_item_id,
+                isbn=isbn_str,
                 coupang_status=coupang_status,
                 sale_price=sale_price,
                 original_price=original_price,
                 product_name=product_name,
-                shipping_policy="free",
-                upload_method="api_sync",
-                uploaded_at=now,
-                last_checked_at=now,
+                synced_at=now,
             )
             new_listings.append(listing)
             result["new"] += 1
             # 룩업에 추가 (같은 배치 내 중복 방지)
             if seller_product_id:
                 by_product_id[seller_product_id] = listing
-            if isbn:
-                by_isbn[isbn] = listing
+            if isbn_str:
+                by_isbn[isbn_str] = listing
 
     # 신규 listings 일괄 추가
     if new_listings:
@@ -426,37 +386,19 @@ def sync_account_products(
             lst.brand = parsed["brand"]
             lst.display_category_code = parsed["display_category_code"]
             lst.delivery_charge_type = parsed["delivery_charge_type"]
-            lst.maximum_buy_count = parsed["maximum_buy_count"]
-            # Note: maximumBuyCount는 구매제한 수량(1000)이므로 stock_quantity에 넣지 않음
-            # 실제 재고는 아래 get_item_inventory() API에서 amountInStock으로 업데이트
             lst.supply_price = parsed["supply_price"]
             lst.delivery_charge = parsed["delivery_charge"]
             lst.free_ship_over_amount = parsed["free_ship_over_amount"]
             lst.return_charge = parsed["return_charge"]
 
-            # 아이템 위너 정보
-            if parsed["winner_status"] is not None:
-                lst.winner_status = parsed["winner_status"]
-                lst.winner_checked_at = now
-            if parsed["item_id"] and not lst.item_id:
-                lst.item_id = parsed["item_id"]
-
-            # ISBN (attributes에서 추출한 것이 더 정확)
-            # 단, 같은 account_id + isbn 조합이 이미 있으면 스킵 (UNIQUE 제약)
+            # ISBN (attributes에서 추출한 것을 기존 isbn에 병합)
             if parsed["isbn"] and not lst.isbn:
-                existing_with_isbn = db.query(Listing).filter(
-                    Listing.account_id == lst.account_id,
-                    Listing.isbn == parsed["isbn"],
-                    Listing.id != lst.id
-                ).first()
-                if not existing_with_isbn:
-                    lst.isbn = parsed["isbn"]
+                lst.isbn = parsed["isbn"]
 
             # 가격 업데이트
             if parsed["original_price"] and parsed["original_price"] > 0:
                 lst.original_price = parsed["original_price"]
             if parsed["sale_price"] and parsed["sale_price"] > 0:
-                lst.coupang_sale_price = parsed["sale_price"]
                 lst.sale_price = parsed["sale_price"]
 
             # onSale 상태 조회 (vendor_item_id가 있으면)

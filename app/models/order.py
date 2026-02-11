@@ -14,6 +14,7 @@ class Order(Base):
         Index("ix_order_account_date", "account_id", "ordered_at"),
         Index("ix_order_account_status", "account_id", "status"),
         Index("ix_order_order_id", "order_id"),
+        Index("ix_order_account_listing", "account_id", "listing_id"),
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)

@@ -147,9 +147,8 @@ def fix_prices(dry_run: bool = True):
                     total_fail += 1
                     continue
 
-                # 성공 시 DB 업데이트
+                # 성공 시 DB 업데이트 (coupang_sale_price 삭제됨, sale_price만 업데이트)
                 listing.sale_price = correct_price
-                listing.coupang_sale_price = correct_price
                 db.commit()
 
                 print(f"      -> OK")

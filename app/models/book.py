@@ -1,5 +1,5 @@
 """도서 원본 데이터 모델"""
-from sqlalchemy import Column, Integer, String, Text, Date, Boolean, DateTime, ForeignKey
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from app.database import Base
@@ -16,16 +16,10 @@ class Book(Base):
     # 기본 정보
     isbn = Column(String(13), unique=True, nullable=False, index=True)
     title = Column(String(500), nullable=False)
-    author = Column(String(200))
     publisher_id = Column(Integer, ForeignKey('publishers.id'), index=True)
-    publisher_name = Column(String(100), index=True)  # 검색 편의용
 
     # 가격
     list_price = Column(Integer, nullable=False)  # 정가
-
-    # 분류
-    category = Column(String(100))
-    subcategory = Column(String(100))
 
     # 연도 및 정규화 (묶음 SKU용)
     year = Column(Integer, index=True)  # 2024, 2025 등
@@ -33,15 +27,7 @@ class Book(Base):
     normalized_series = Column(String(200), index=True)  # 시리즈명
 
     # 메타데이터
-    image_url = Column(Text)
-    description = Column(Text)
-    source_url = Column(Text)  # 알라딘 URL
-    publish_date = Column(Date)
-    page_count = Column(Integer)
     sales_point = Column(Integer, default=0, index=True)  # 알라딘 판매 포인트
-
-    # 상태
-    is_processed = Column(Boolean, default=False, index=True)
     crawled_at = Column(DateTime, default=datetime.utcnow)
 
     # Relationships

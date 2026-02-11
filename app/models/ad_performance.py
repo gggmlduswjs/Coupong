@@ -1,5 +1,5 @@
 """광고 성과 상세 모델 (광고센터 보고서 기반)"""
-from sqlalchemy import Column, Integer, String, Float, ForeignKey, Date, DateTime, UniqueConstraint, Index
+from sqlalchemy import Column, Integer, BigInteger, String, Float, ForeignKey, Date, DateTime, UniqueConstraint, Index
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from app.database import Base
@@ -18,6 +18,7 @@ class AdPerformance(Base):
         Index("ix_adperf_account_date", "account_id", "ad_date"),
         Index("ix_adperf_listing", "listing_id"),
         Index("ix_adperf_product", "coupang_product_id"),
+        Index("ix_adperf_account_date_listing", "account_id", "ad_date", "listing_id"),
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -30,7 +31,7 @@ class AdPerformance(Base):
     ad_group_name = Column(String(200), default="")
 
     # 상품 (상품 보고서용)
-    coupang_product_id = Column(String(50), default="")  # 쿠팡 상품ID
+    coupang_product_id = Column(BigInteger, nullable=True)  # 쿠팡 상품ID
     product_name = Column(String(500), default="")
     listing_id = Column(Integer, ForeignKey("listings.id"), nullable=True)
 

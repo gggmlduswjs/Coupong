@@ -126,8 +126,7 @@ def extract_book_info(aladin_item: Dict) -> Dict:
         {
             'isbn': ISBN-13,
             'title': 제목,
-            'author': 저자,
-            'publisher_name': 출판사,
+            'publisher': 출판사명 (매칭용),
             'year': 출판연도,
             'list_price': 정가
         }
@@ -146,8 +145,7 @@ def extract_book_info(aladin_item: Dict) -> Dict:
     return {
         'isbn': isbn,
         'title': aladin_item.get('title', ''),
-        'author': aladin_item.get('author', ''),
-        'publisher_name': aladin_item.get('publisher', ''),
+        'publisher': aladin_item.get('publisher', ''),
         'year': year,
         'list_price': aladin_item.get('priceStandard', 0)
     }
@@ -180,13 +178,11 @@ def insert_books_to_db(books: List[Dict], conn, dry_run: bool = False) -> tuple:
         if not dry_run:
             try:
                 cursor.execute("""
-                    INSERT INTO books (isbn, title, author, publisher_name, year, list_price, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO books (isbn, title, year, list_price, crawled_at)
+                    VALUES (?, ?, ?, ?, ?)
                 """, (
                     book['isbn'],
                     book['title'],
-                    book['author'],
-                    book['publisher_name'],
                     book['year'],
                     book['list_price'],
                     datetime.utcnow()

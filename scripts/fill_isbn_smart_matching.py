@@ -153,8 +153,9 @@ def build_smart_query(components: dict) -> Tuple[str, List]:
         return None, None
 
     query = f"""
-        SELECT isbn, title, year, publisher_name
-        FROM books
+        SELECT b.isbn, b.title, b.year, pub.name as publisher_name
+        FROM books b
+        LEFT JOIN publishers pub ON b.publisher_id = pub.id
         WHERE {' AND '.join(conditions)}
         LIMIT 5
     """

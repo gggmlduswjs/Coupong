@@ -966,7 +966,7 @@ def render(selected_account, accounts_df, account_names):
                            COALESCE(b.title, b2.title) as "DB도서명",
                            l.product_name as 리스팅도서명,
                            COALESCE(b.list_price, b2.list_price) as 정가,
-                           COALESCE(b.author, b2.author) as 저자,
+                           '' as 저자,
                            COALESCE(b.year, b2.year) as 출판년도,
                            COALESCE(pub.name, pub2.name) as 출판사,
                            COALESCE(pub.supply_rate, pub2.supply_rate) as 공급률

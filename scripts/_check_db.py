@@ -14,19 +14,28 @@ print(f'sale_price > 0: {has_sp}')
 
 print()
 print('--- sample (5) ---')
-rows = c.execute('SELECT product_name, sale_price, original_price, coupang_status, upload_method FROM listings LIMIT 5').fetchall()
+rows = c.execute('SELECT product_name, sale_price, original_price, coupang_status FROM listings LIMIT 5').fetchall()
 for r in rows:
     name = (r[0] or '?')[:40]
-    print(f'  {name} | sale={r[1]} | orig={r[2]} | st={r[3]} | m={r[4]}')
-
-print()
-print('--- upload_method ---')
-for r in c.execute('SELECT upload_method, COUNT(*) FROM listings GROUP BY upload_method').fetchall():
-    print(f'  {r[0]}: {r[1]}')
+    print(f'  {name} | sale={r[1]} | orig={r[2]} | st={r[3]}')
 
 print()
 print('--- coupang_status ---')
 for r in c.execute('SELECT coupang_status, COUNT(*) FROM listings GROUP BY coupang_status').fetchall():
+    print(f'  {r[0]}: {r[1]}')
+
+print()
+print('--- product type (by product_id/bundle_id) ---')
+for r in c.execute('''
+    SELECT
+        CASE
+            WHEN bundle_id IS NOT NULL THEN 'bundle'
+            WHEN product_id IS NOT NULL THEN 'single'
+            ELSE 'unknown'
+        END AS ptype,
+        COUNT(*)
+    FROM listings GROUP BY ptype
+''').fetchall():
     print(f'  {r[0]}: {r[1]}')
 
 conn.close()

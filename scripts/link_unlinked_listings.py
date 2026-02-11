@@ -104,15 +104,8 @@ def main():
             book = Book(
                 isbn=isbn,
                 title=item.get('title', ''),
-                author=item.get('author', ''),
-                publisher_name=pub_name,
                 publisher_id=publisher.id,
                 list_price=item.get('priceStandard', item.get('priceSales', 0)),
-                publish_date=item.get('pubDate', ''),
-                image_url=item.get('cover', ''),
-                description=item.get('description', ''),
-                category=item.get('categoryName', ''),
-                source_url=item.get('link', '')
             )
             db.add(book)
             db.flush()

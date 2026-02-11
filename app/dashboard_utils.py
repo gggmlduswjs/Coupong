@@ -83,12 +83,12 @@ def product_to_upload_data(row):
     return {
         "product_name": row.get("title", ""),
         "publisher": row.get("publisher_name", ""),
-        "author": row.get("author", ""),
+        "author": "",
         "isbn": row.get("isbn", ""),
         "original_price": int(row.get("list_price", 0)),
         "sale_price": int(row.get("sale_price", 0)),
-        "main_image_url": row.get("image_url", "") or "",
-        "description": row.get("description", "") or "",
+        "main_image_url": "",
+        "description": "",
         "shipping_policy": row.get("shipping_policy", "free"),
         "margin_rate": int(round(sr * 100)),
     }
