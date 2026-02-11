@@ -1,0 +1,15 @@
+[Unit]
+Description=Coupong Streamlit Dashboard
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/Coupong
+Environment=PATH=/home/ubuntu/Coupong/venv/bin:/usr/bin
+ExecStart=/home/ubuntu/Coupong/venv/bin/streamlit run dashboard.py --server.port 8503 --server.address 0.0.0.0 --server.headless true
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
