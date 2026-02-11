@@ -24,11 +24,19 @@ def _resolve_database_url() -> str:
     # 2) Streamlit secrets (Streamlit Cloud 배포 시)
     try:
         import streamlit as st
-        secrets = st.secrets
-        supabase_url = secrets.get("supabase", {}).get("database_url")
-        if supabase_url:
-            return supabase_url
-    except Exception:
+        if hasattr(st, "secrets"):
+            # [supabase] 섹션
+            if "supabase" in st.secrets:
+                url = st.secrets["supabase"]["database_url"]
+                if url:
+                    return url
+            # 최상위 키
+            if "DATABASE_URL" in st.secrets:
+                url = st.secrets["DATABASE_URL"]
+                if url:
+                    return url
+    except Exception as e:
+        _logger.warning(f"Streamlit secrets 읽기 실패: {e}")
         pass
 
     # 3) app/config.py 설정
