@@ -81,7 +81,7 @@ with engine.connect() as conn:
     rows = conn.execute(text('''
         SELECT l.id, l.account_id, l.coupang_product_id, l.isbn, l.product_name, l.sale_price, l.original_price
         FROM listings l
-        WHERE l.coupang_product_id IS NOT NULL AND l.coupang_product_id != ''
+        WHERE l.coupang_product_id IS NOT NULL
         ORDER BY l.account_id
     ''')).fetchall()
 

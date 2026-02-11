@@ -75,7 +75,7 @@ def pass1_wing_api(account_id=None, limit=0):
         acct_id_filter = f"AND account_id = {accounts[0][0]}" if account_id else ""
         rows = conn.execute(text(f"""
             SELECT id, account_id, coupang_product_id FROM listings
-            WHERE isbn IS NULL AND coupang_product_id IS NOT NULL AND coupang_product_id != ''
+            WHERE isbn IS NULL AND coupang_product_id IS NOT NULL
             {acct_id_filter}
             ORDER BY account_id {limit_clause}
         """)).fetchall()

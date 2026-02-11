@@ -175,7 +175,7 @@ class WingAPIStrategy(BaseISBNStrategy):
 
             rows = _get_candidates(
                 conn, account, limit,
-                extra_filter="AND coupang_product_id IS NOT NULL AND coupang_product_id != ''",
+                extra_filter="AND coupang_product_id IS NOT NULL",
             )
             total = len(rows)
             print(f"  처리 대상: {total}건 (계정: {len(clients)}개)")

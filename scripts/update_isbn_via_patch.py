@@ -98,7 +98,7 @@ with engine.connect() as conn:
     # ISBN이 NULL이고 coupang_product_id가 있는 것만 (테스트: 10개)
     rows = conn.execute(text(
         "SELECT id, account_id, coupang_product_id FROM listings "
-        "WHERE isbn IS NULL AND coupang_product_id IS NOT NULL AND coupang_product_id != '' "
+        "WHERE isbn IS NULL AND coupang_product_id IS NOT NULL "
         "AND account_id = 1 "  # 007-book만
         "ORDER BY account_id LIMIT 10"  # 테스트: 10개
     )).fetchall()

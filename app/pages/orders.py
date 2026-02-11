@@ -492,7 +492,7 @@ def render(selected_account, accounts_df, account_names):
                     LEFT JOIN products p ON l.product_id = p.id
                     LEFT JOIN books b ON p.book_id = b.id
                     LEFT JOIN books b2 ON l.isbn = b2.isbn AND l.isbn IS NOT NULL AND l.isbn != ''
-                    WHERE l.coupang_product_id IS NOT NULL AND l.coupang_product_id != ''
+                    WHERE l.coupang_product_id IS NOT NULL
                 """)
                 _isbn_map = {}
                 if not _isbn_lookup.empty:
@@ -976,7 +976,7 @@ def render(selected_account, accounts_df, account_names):
                     LEFT JOIN publishers pub ON b.publisher_id = pub.id
                     LEFT JOIN books b2 ON l.isbn = b2.isbn AND l.isbn IS NOT NULL AND l.isbn != ''
                     LEFT JOIN publishers pub2 ON b2.publisher_id = pub2.id
-                    WHERE l.coupang_product_id IS NOT NULL AND l.coupang_product_id != ''
+                    WHERE l.coupang_product_id IS NOT NULL
                 """)
                 _gk_map = {}
                 if not _gk_isbn_lookup.empty:
