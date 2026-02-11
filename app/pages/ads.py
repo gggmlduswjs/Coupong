@@ -480,7 +480,7 @@ def _render_campaign_table(d_from, d_to, aw_perf, p_cnt):
         return
 
     campaigns = query_df(f"""
-        SELECT ap.campaign_name as 캠페인,
+        SELECT ap.campaign_name, ap.campaign_id,
             SUM(ap.impressions) as 노출수,
             SUM(ap.clicks) as 클릭수,
             ROUND(SUM(ap.clicks) * 100.0 / NULLIF(SUM(ap.impressions), 0), 2) as "CTR(%)",
@@ -491,9 +491,15 @@ def _render_campaign_table(d_from, d_to, aw_perf, p_cnt):
         FROM ad_performances ap
         WHERE ap.ad_date BETWEEN '{d_from}' AND '{d_to}' {aw_perf}
             AND ap.campaign_name != ''
-        GROUP BY ap.campaign_name ORDER BY 광고비 DESC
+        GROUP BY ap.campaign_name, ap.campaign_id ORDER BY 광고비 DESC
         LIMIT 30
     """)
+    if not campaigns.empty:
+        campaigns["캠페인"] = campaigns.apply(
+            lambda r: f"{r['campaign_name']} ({r['campaign_id']})" if r["campaign_id"] else r["campaign_name"], axis=1)
+        campaigns = campaigns.drop(columns=["campaign_name", "campaign_id"])
+        cols = ["캠페인"] + [c for c in campaigns.columns if c != "캠페인"]
+        campaigns = campaigns[cols]
     if not campaigns.empty:
         st.dataframe(fmt_money_df(campaigns), hide_index=True, use_container_width=True)
         xl = _df_to_excel_bytes(campaigns, "캠페인별")
@@ -511,7 +517,7 @@ def _render_product_top(d_from, d_to, aw_perf, p_cnt):
         return
 
     products = query_df(f"""
-        SELECT ap.product_name as 상품명,
+        SELECT ap.campaign_name, ap.campaign_id, ap.product_name as 상품명,
             SUM(ap.impressions) as 노출수,
             SUM(ap.clicks) as 클릭수,
             SUM(ap.ad_spend) as 광고비,
@@ -521,9 +527,15 @@ def _render_product_top(d_from, d_to, aw_perf, p_cnt):
         FROM ad_performances ap
         WHERE ap.ad_date BETWEEN '{d_from}' AND '{d_to}' {aw_perf}
             AND ap.product_name != ''
-        GROUP BY ap.coupang_product_id, ap.product_name ORDER BY 전환매출 DESC
+        GROUP BY ap.campaign_name, ap.campaign_id, ap.coupang_product_id, ap.product_name ORDER BY 전환매출 DESC
         LIMIT 20
     """)
+    if not products.empty:
+        products["캠페인"] = products.apply(
+            lambda r: f"{r['campaign_name']} ({r['campaign_id']})" if r["campaign_id"] else r["campaign_name"], axis=1)
+        products = products.drop(columns=["campaign_name", "campaign_id"])
+        cols = ["캠페인"] + [c for c in products.columns if c != "캠페인"]
+        products = products[cols]
     if not products.empty:
         products.insert(0, "#", range(1, len(products) + 1))
         st.dataframe(fmt_money_df(products), hide_index=True, use_container_width=True)
@@ -542,7 +554,8 @@ def _render_keyword_table(d_from, d_to, aw_perf, p_cnt):
         return
 
     keywords = query_df(f"""
-        SELECT ap.keyword as 키워드,
+        SELECT ap.campaign_name, ap.campaign_id,
+            ap.keyword as 키워드,
             ap.match_type as 매치유형,
             SUM(ap.impressions) as 노출수,
             SUM(ap.clicks) as 클릭수,
@@ -554,9 +567,15 @@ def _render_keyword_table(d_from, d_to, aw_perf, p_cnt):
         FROM ad_performances ap
         WHERE ap.ad_date BETWEEN '{d_from}' AND '{d_to}' {aw_perf}
             AND ap.keyword != ''
-        GROUP BY ap.keyword, ap.match_type ORDER BY 광고비 DESC
+        GROUP BY ap.campaign_name, ap.campaign_id, ap.keyword, ap.match_type ORDER BY 광고비 DESC
         LIMIT 30
     """)
+    if not keywords.empty:
+        keywords["캠페인"] = keywords.apply(
+            lambda r: f"{r['campaign_name']} ({r['campaign_id']})" if r["campaign_id"] else r["campaign_name"], axis=1)
+        keywords = keywords.drop(columns=["campaign_name", "campaign_id"])
+        cols = ["캠페인"] + [c for c in keywords.columns if c != "캠페인"]
+        keywords = keywords[cols]
     if not keywords.empty:
         st.dataframe(fmt_money_df(keywords), hide_index=True, use_container_width=True)
         xl = _df_to_excel_bytes(keywords, "키워드별")
@@ -652,7 +671,8 @@ def _render_efficiency_report(d_from, d_to, aw_perf, p_cnt):
 
     # ── 키워드별 집계 ──
     kw_df = query_df(f"""
-        SELECT ap.keyword as 키워드, ap.match_type as 매치유형,
+        SELECT ap.campaign_name, ap.campaign_id,
+            ap.keyword as 키워드, ap.match_type as 매치유형,
             SUM(ap.impressions) as 노출수,
             SUM(ap.clicks) as 클릭수,
             SUM(ap.ad_spend) as 광고비,
@@ -663,14 +683,20 @@ def _render_efficiency_report(d_from, d_to, aw_perf, p_cnt):
         FROM ad_performances ap
         WHERE ap.ad_date BETWEEN '{d_from}' AND '{d_to}' {aw_perf}
             AND ap.keyword != '' AND ap.keyword != '-'
-        GROUP BY ap.keyword, ap.match_type
+        GROUP BY ap.campaign_name, ap.campaign_id, ap.keyword, ap.match_type
         HAVING SUM(ap.ad_spend) > 0
         ORDER BY 광고비 DESC
     """)
+    if not kw_df.empty:
+        kw_df["캠페인"] = kw_df.apply(
+            lambda r: f"{r['campaign_name']} ({r['campaign_id']})" if r["campaign_id"] else r["campaign_name"], axis=1)
+        kw_df = kw_df.drop(columns=["campaign_name", "campaign_id"])
+        cols = ["캠페인"] + [c for c in kw_df.columns if c != "캠페인"]
+        kw_df = kw_df[cols]
 
     # ── 상품별 집계 ──
     prod_df = query_df(f"""
-        SELECT ap.product_name as 상품명,
+        SELECT ap.campaign_name, ap.campaign_id, ap.product_name as 상품명,
             SUM(ap.impressions) as 노출수,
             SUM(ap.clicks) as 클릭수,
             SUM(ap.ad_spend) as 광고비,
@@ -680,14 +706,20 @@ def _render_efficiency_report(d_from, d_to, aw_perf, p_cnt):
         FROM ad_performances ap
         WHERE ap.ad_date BETWEEN '{d_from}' AND '{d_to}' {aw_perf}
             AND ap.product_name != ''
-        GROUP BY ap.coupang_product_id, ap.product_name
+        GROUP BY ap.campaign_name, ap.campaign_id, ap.coupang_product_id, ap.product_name
         HAVING SUM(ap.ad_spend) > 0
         ORDER BY 광고비 DESC
     """)
+    if not prod_df.empty:
+        prod_df["캠페인"] = prod_df.apply(
+            lambda r: f"{r['campaign_name']} ({r['campaign_id']})" if r["campaign_id"] else r["campaign_name"], axis=1)
+        prod_df = prod_df.drop(columns=["campaign_name", "campaign_id"])
+        cols = ["캠페인"] + [c for c in prod_df.columns if c != "캠페인"]
+        prod_df = prod_df[cols]
 
     # ── 캠페인별 집계 ──
     camp_df = query_df(f"""
-        SELECT ap.campaign_name as 캠페인,
+        SELECT ap.campaign_name, ap.campaign_id,
             SUM(ap.impressions) as 노출수,
             SUM(ap.clicks) as 클릭수,
             SUM(ap.ad_spend) as 광고비,
@@ -697,10 +729,36 @@ def _render_efficiency_report(d_from, d_to, aw_perf, p_cnt):
         FROM ad_performances ap
         WHERE ap.ad_date BETWEEN '{d_from}' AND '{d_to}' {aw_perf}
             AND ap.campaign_name != ''
-        GROUP BY ap.campaign_name
+        GROUP BY ap.campaign_name, ap.campaign_id
         HAVING SUM(ap.ad_spend) > 0
         ORDER BY 광고비 DESC
     """)
+    if not camp_df.empty:
+        camp_df["캠페인"] = camp_df.apply(
+            lambda r: f"{r['campaign_name']} ({r['campaign_id']})" if r["campaign_id"] else r["campaign_name"], axis=1)
+        camp_df = camp_df.drop(columns=["campaign_name", "campaign_id"])
+        cols = ["캠페인"] + [c for c in camp_df.columns if c != "캠페인"]
+        camp_df = camp_df[cols]
+
+    # ── 캠페인 필터 ──
+    all_campaigns = sorted(set(
+        (kw_df["캠페인"].unique().tolist() if not kw_df.empty else [])
+        + (prod_df["캠페인"].unique().tolist() if not prod_df.empty else [])
+        + (camp_df["캠페인"].unique().tolist() if not camp_df.empty else [])
+    ))
+    camp_filter = st.selectbox(
+        "캠페인 필터", ["전체"] + all_campaigns, key="eff_camp_filter")
+
+    if camp_filter != "전체":
+        kw_df = kw_df[kw_df["캠페인"] == camp_filter] if not kw_df.empty else kw_df
+        prod_df = prod_df[prod_df["캠페인"] == camp_filter] if not prod_df.empty else prod_df
+        camp_df = camp_df[camp_df["캠페인"] == camp_filter] if not camp_df.empty else camp_df
+        # 선택 캠페인 기준 총 광고비 재계산
+        total_spend = int(kw_df["광고비"].sum()) + int(prod_df[~prod_df["상품명"].isin([""])]["광고비"].sum()) if not kw_df.empty else 0
+        if not camp_df.empty:
+            total_spend = int(camp_df["광고비"].sum())
+
+    st.divider()
 
     # ── 분류 ──
     zero_conv_kw = kw_df[kw_df["전환주문"] == 0] if not kw_df.empty else pd.DataFrame()
@@ -769,13 +827,43 @@ def _render_efficiency_report(d_from, d_to, aw_perf, p_cnt):
     else:
         st.info("캠페인 데이터가 없습니다.")
 
+    # ── (E) 개선 제안 ──
+    st.divider()
+    st.subheader("개선 제안")
+
+    recs_df = _generate_recommendations(kw_df, prod_df, camp_df)
+
+    if not recs_df.empty:
+        # 요약 카드
+        n_stop = len(recs_df[recs_df["조치"].str.contains("중지")])
+        n_adjust = len(recs_df[recs_df["조치"].str.contains("하향|점검|정리", regex=True)])
+        n_expand = len(recs_df[recs_df["조치"].str.contains("확대|상향", regex=True)])
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("즉시 중지 권장", f"{n_stop}건")
+        c2.metric("입찰가/키워드 조정", f"{n_adjust}건")
+        c3.metric("예산 확대 검토", f"{n_expand}건")
+
+        # 우선순위 아이콘 매핑
+        display_df = recs_df.copy()
+        icon_map = {"높음": "🔴 높음", "중간": "🟡 중간", "낮음": "🟢 낮음"}
+        display_df["우선순위"] = display_df["우선순위"].map(icon_map)
+
+        st.dataframe(
+            fmt_money_df(display_df[["대상유형", "캠페인", "이름", "ROAS(%)", "광고비", "조치", "우선순위", "사유"]]),
+            hide_index=True,
+            use_container_width=True,
+        )
+    else:
+        st.info("조치가 필요한 항목이 없습니다.")
+
     st.divider()
 
-    # ── (E) Excel 다운로드 ──
+    # ── (F) Excel 다운로드 ──
     xl_bytes = _create_efficiency_excel(
         total_spend, wasted_spend, waste_pct, efficient_kw_count,
         zero_conv_kw, good_kw, zero_conv_prod, good_prod, camp_df,
-        d_from, d_to,
+        recs_df, d_from, d_to,
     )
     st.download_button(
         "효율 리포트 Excel 다운로드",
@@ -790,7 +878,7 @@ def _render_efficiency_report(d_from, d_to, aw_perf, p_cnt):
 
 def _create_efficiency_excel(total_spend, wasted_spend, waste_pct, efficient_kw_count,
                               zero_conv_kw, good_kw, zero_conv_prod, good_prod,
-                              camp_df, d_from, d_to):
+                              camp_df, recs_df, d_from, d_to):
     """효율 리포트 멀티시트 Excel 생성"""
     from io import BytesIO
 
@@ -862,4 +950,121 @@ def _create_efficiency_excel(total_spend, wasted_spend, waste_pct, efficient_kw_
             pd.DataFrame({"메시지": ["캠페인 데이터 없음"]}).to_excel(
                 writer, sheet_name="캠페인 비교", index=False)
 
+        # Sheet 7: 개선 제안
+        if recs_df is not None and not recs_df.empty:
+            recs_df.to_excel(writer, sheet_name="개선 제안", index=False, startrow=1)
+            ws = writer.sheets["개선 제안"]
+            _style_excel_header(ws, len(recs_df.columns), len(recs_df),
+                                f"개선 제안 ({period_label})")
+        else:
+            pd.DataFrame({"메시지": ["조치가 필요한 항목 없음"]}).to_excel(
+                writer, sheet_name="개선 제안", index=False)
+
     return buf.getvalue()
+
+
+def _generate_recommendations(kw_df, prod_df, camp_df):
+    """키워드/상품/캠페인별 조치 권장 목록 생성"""
+    recs = []
+
+    # ── 키워드 조치 ──
+    if not kw_df.empty:
+        for _, r in kw_df.iterrows():
+            conv = int(r.get("전환주문", 0) or 0)
+            spend = int(r.get("광고비", 0) or 0)
+            roas = float(r.get("ROAS(%)", 0) or 0)
+            clicks = int(r.get("클릭수", 0) or 0)
+            impressions = int(r.get("노출수", 0) or 0)
+            ctr = (clicks / impressions * 100) if impressions > 0 else 0
+            name = r.get("키워드", "")
+            campaign = r.get("캠페인", "")
+
+            if conv == 0 and ctr >= 5:
+                recs.append({"대상유형": "키워드", "캠페인": campaign, "이름": name,
+                             "ROAS(%)": roas, "광고비": spend,
+                             "조치": "상품페이지 점검", "우선순위": "높음",
+                             "사유": f"CTR {ctr:.1f}%로 높으나 전환 0건"})
+            elif conv == 0 and spend >= 5000:
+                recs.append({"대상유형": "키워드", "캠페인": campaign, "이름": name,
+                             "ROAS(%)": roas, "광고비": spend,
+                             "조치": "키워드 중지", "우선순위": "높음",
+                             "사유": f"전환 0건, 광고비 {spend:,}원 소진"})
+            elif conv == 0 and spend < 5000:
+                recs.append({"대상유형": "키워드", "캠페인": campaign, "이름": name,
+                             "ROAS(%)": roas, "광고비": spend,
+                             "조치": "모니터링", "우선순위": "낮음",
+                             "사유": "전환 0건, 데이터 부족"})
+            elif roas < 100:
+                recs.append({"대상유형": "키워드", "캠페인": campaign, "이름": name,
+                             "ROAS(%)": roas, "광고비": spend,
+                             "조치": "입찰가 하향 또는 중지", "우선순위": "높음",
+                             "사유": f"ROAS {roas:.0f}% 적자"})
+            elif roas < 200:
+                recs.append({"대상유형": "키워드", "캠페인": campaign, "이름": name,
+                             "ROAS(%)": roas, "광고비": spend,
+                             "조치": "입찰가 하향 검토", "우선순위": "중간",
+                             "사유": f"ROAS {roas:.0f}% 저효율"})
+            elif roas >= 500 and clicks >= 10:
+                recs.append({"대상유형": "키워드", "캠페인": campaign, "이름": name,
+                             "ROAS(%)": roas, "광고비": spend,
+                             "조치": "입찰가 상향 검토", "우선순위": "중간",
+                             "사유": f"ROAS {roas:.0f}%, 클릭 {clicks}회 — 확대 여지"})
+
+    # ── 상품 조치 ──
+    if not prod_df.empty:
+        for _, r in prod_df.iterrows():
+            conv = int(r.get("전환주문", 0) or 0)
+            spend = int(r.get("광고비", 0) or 0)
+            roas = float(r.get("ROAS(%)", 0) or 0)
+            name = r.get("상품명", "")
+            campaign = r.get("캠페인", "")
+
+            if conv == 0 and spend >= 10000:
+                recs.append({"대상유형": "상품", "캠페인": campaign, "이름": name,
+                             "ROAS(%)": roas, "광고비": spend,
+                             "조치": "광고 중지", "우선순위": "높음",
+                             "사유": f"전환 0건, 광고비 {spend:,}원 소진"})
+            elif conv > 0 and roas < 100:
+                recs.append({"대상유형": "상품", "캠페인": campaign, "이름": name,
+                             "ROAS(%)": roas, "광고비": spend,
+                             "조치": "예산 축소 또는 중지", "우선순위": "높음",
+                             "사유": f"ROAS {roas:.0f}% 적자"})
+            elif conv > 0 and roas >= 500:
+                recs.append({"대상유형": "상품", "캠페인": campaign, "이름": name,
+                             "ROAS(%)": roas, "광고비": spend,
+                             "조치": "예산 확대 검토", "우선순위": "중간",
+                             "사유": f"ROAS {roas:.0f}% 고효율"})
+
+    # ── 캠페인 조치 ──
+    if not camp_df.empty:
+        for _, r in camp_df.iterrows():
+            roas = float(r.get("ROAS(%)", 0) or 0)
+            spend = int(r.get("광고비", 0) or 0)
+            name = r.get("캠페인", "")
+
+            if roas < 100:
+                recs.append({"대상유형": "캠페인", "캠페인": name, "이름": name,
+                             "ROAS(%)": roas, "광고비": spend,
+                             "조치": "캠페인 예산 축소", "우선순위": "높음",
+                             "사유": f"ROAS {roas:.0f}% 적자"})
+            elif roas < 200:
+                recs.append({"대상유형": "캠페인", "캠페인": name, "이름": name,
+                             "ROAS(%)": roas, "광고비": spend,
+                             "조치": "키워드 정리 필요", "우선순위": "중간",
+                             "사유": f"ROAS {roas:.0f}% 저효율"})
+            elif roas >= 300:
+                recs.append({"대상유형": "캠페인", "캠페인": name, "이름": name,
+                             "ROAS(%)": roas, "광고비": spend,
+                             "조치": "예산 확대 검토", "우선순위": "중간",
+                             "사유": f"ROAS {roas:.0f}% 고효율"})
+
+    if not recs:
+        return pd.DataFrame()
+
+    recs_df = pd.DataFrame(recs)
+    # 우선순위 정렬: 높음 → 중간 → 낮음, 같은 순위 내 광고비 내림차순
+    priority_order = {"높음": 0, "중간": 1, "낮음": 2}
+    recs_df["_sort"] = recs_df["우선순위"].map(priority_order)
+    recs_df = (recs_df.sort_values(["_sort", "광고비"], ascending=[True, False])
+               .drop(columns="_sort").reset_index(drop=True))
+    return recs_df

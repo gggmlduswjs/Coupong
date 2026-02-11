@@ -72,10 +72,26 @@ class AdSpendSync:
 
     def _ensure_table(self):
         """테이블이 없으면 생성"""
+        from app.database import _is_postgresql
+        is_pg = _is_postgresql(str(self.engine.url))
+
         with self.engine.connect() as conn:
-            conn.execute(text(self.CREATE_TABLE_SQL))
-            for idx_sql in self.CREATE_INDEXES_SQL:
-                conn.execute(text(idx_sql))
+            if is_pg:
+                exists = conn.execute(text(
+                    "SELECT 1 FROM information_schema.tables WHERE table_name = 'ad_spends'"
+                )).fetchone()
+                if not exists:
+                    pg_sql = self.CREATE_TABLE_SQL.replace(
+                        "INTEGER PRIMARY KEY AUTOINCREMENT",
+                        "SERIAL PRIMARY KEY"
+                    )
+                    conn.execute(text(pg_sql))
+                    for idx_sql in self.CREATE_INDEXES_SQL:
+                        conn.execute(text(idx_sql))
+            else:
+                conn.execute(text(self.CREATE_TABLE_SQL))
+                for idx_sql in self.CREATE_INDEXES_SQL:
+                    conn.execute(text(idx_sql))
             conn.commit()
         logger.info("ad_spends 테이블 확인 완료")
 
@@ -188,26 +204,41 @@ class AdSpendSync:
         return account_id, rows
 
     def save_to_db(self, account_id: int, rows: List[dict]) -> int:
-        """파싱된 데이터를 DB에 INSERT OR REPLACE"""
+        """UPSERT로 DB 저장 (SQLite: INSERT OR REPLACE, PG: ON CONFLICT DO UPDATE)"""
         if not rows:
             return 0
+
+        from app.database import _is_postgresql
+        is_pg = _is_postgresql(str(self.engine.url))
+
+        _cols = """(account_id, ad_date, campaign_id, campaign_name,
+                         ad_type, ad_objective, daily_budget,
+                         spent_amount, adjustment, spent_after_adjust,
+                         over_spend, billable_cost, vat_amount, total_charge)"""
+        _vals = """(:account_id, :ad_date, :campaign_id, :campaign_name,
+                         :ad_type, :ad_objective, :daily_budget,
+                         :spent_amount, :adjustment, :spent_after_adjust,
+                         :over_spend, :billable_cost, :vat_amount, :total_charge)"""
+
+        if is_pg:
+            _update_cols = ", ".join(
+                f"{c} = EXCLUDED.{c}" for c in [
+                    "campaign_name", "ad_type", "ad_objective", "daily_budget",
+                    "spent_amount", "adjustment", "spent_after_adjust",
+                    "over_spend", "billable_cost", "vat_amount", "total_charge",
+                ]
+            )
+            sql = f"""INSERT INTO ad_spends {_cols} VALUES {_vals}
+                ON CONFLICT (account_id, ad_date, campaign_id)
+                DO UPDATE SET {_update_cols}"""
+        else:
+            sql = f"INSERT OR REPLACE INTO ad_spends {_cols} VALUES {_vals}"
 
         upserted = 0
         with self.engine.connect() as conn:
             for row in rows:
                 try:
-                    conn.execute(text("""
-                        INSERT OR REPLACE INTO ad_spends
-                        (account_id, ad_date, campaign_id, campaign_name,
-                         ad_type, ad_objective, daily_budget,
-                         spent_amount, adjustment, spent_after_adjust,
-                         over_spend, billable_cost, vat_amount, total_charge)
-                        VALUES
-                        (:account_id, :ad_date, :campaign_id, :campaign_name,
-                         :ad_type, :ad_objective, :daily_budget,
-                         :spent_amount, :adjustment, :spent_after_adjust,
-                         :over_spend, :billable_cost, :vat_amount, :total_charge)
-                    """), {
+                    conn.execute(text(sql), {
                         "account_id": account_id,
                         "ad_date": row["ad_date"].isoformat(),
                         "campaign_id": row["campaign_id"],

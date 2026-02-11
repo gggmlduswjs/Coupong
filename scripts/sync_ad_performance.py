@@ -277,25 +277,44 @@ class AdPerformanceSync:
 
     def _ensure_table(self):
         """테이블이 없으면 생성, 있으면 새 컬럼 마이그레이션"""
-        with self.engine.connect() as conn:
-            conn.execute(text(self.CREATE_TABLE_SQL))
-            for idx_sql in self.CREATE_INDEXES_SQL:
-                conn.execute(text(idx_sql))
+        from app.database import _is_postgresql
+        is_pg = _is_postgresql(str(self.engine.url))
 
-            # 기존 테이블에 새 컬럼 추가 (없으면 ALTER TABLE)
-            existing = {
-                row[1]
-                for row in conn.execute(text("PRAGMA table_info(ad_performances)")).fetchall()
-            }
-            for col_name, col_def in self.MIGRATION_COLUMNS:
-                if col_name not in existing:
-                    try:
-                        conn.execute(text(
-                            f"ALTER TABLE ad_performances ADD COLUMN {col_name} {col_def}"
-                        ))
-                        logger.info(f"컬럼 추가: {col_name} ({col_def})")
-                    except Exception as e:
-                        logger.debug(f"컬럼 추가 스킵 {col_name}: {e}")
+        with self.engine.connect() as conn:
+            if is_pg:
+                # PostgreSQL: ORM이 이미 테이블 생성, 존재 확인만
+                exists = conn.execute(text(
+                    "SELECT 1 FROM information_schema.tables WHERE table_name = 'ad_performances'"
+                )).fetchone()
+                if not exists:
+                    # PG용 CREATE TABLE (SERIAL 사용)
+                    pg_sql = self.CREATE_TABLE_SQL.replace(
+                        "INTEGER PRIMARY KEY AUTOINCREMENT",
+                        "SERIAL PRIMARY KEY"
+                    )
+                    conn.execute(text(pg_sql))
+                    for idx_sql in self.CREATE_INDEXES_SQL:
+                        conn.execute(text(idx_sql))
+            else:
+                # SQLite: 기존 로직
+                conn.execute(text(self.CREATE_TABLE_SQL))
+                for idx_sql in self.CREATE_INDEXES_SQL:
+                    conn.execute(text(idx_sql))
+
+                # 기존 테이블에 새 컬럼 추가 (없으면 ALTER TABLE)
+                existing = {
+                    row[1]
+                    for row in conn.execute(text("PRAGMA table_info(ad_performances)")).fetchall()
+                }
+                for col_name, col_def in self.MIGRATION_COLUMNS:
+                    if col_name not in existing:
+                        try:
+                            conn.execute(text(
+                                f"ALTER TABLE ad_performances ADD COLUMN {col_name} {col_def}"
+                            ))
+                            logger.info(f"컬럼 추가: {col_name} ({col_def})")
+                        except Exception as e:
+                            logger.debug(f"컬럼 추가 스킵 {col_name}: {e}")
 
             conn.commit()
         logger.info("ad_performances 테이블 확인 완료")
@@ -623,17 +642,14 @@ class AdPerformanceSync:
         return rows
 
     def save_to_db(self, account_id: int, rows: List[dict]) -> int:
-        """INSERT OR REPLACE로 DB 저장"""
+        """UPSERT로 DB 저장 (SQLite: INSERT OR REPLACE, PG: ON CONFLICT DO UPDATE)"""
         if not rows:
             return 0
 
-        upserted = 0
-        with self.engine.connect() as conn:
-            for row in rows:
-                try:
-                    conn.execute(text("""
-                        INSERT OR REPLACE INTO ad_performances
-                        (account_id, ad_date, campaign_id, campaign_name, ad_group_name,
+        from app.database import _is_postgresql
+        is_pg = _is_postgresql(str(self.engine.url))
+
+        _cols = """(account_id, ad_date, campaign_id, campaign_name, ad_group_name,
                          coupang_product_id, product_name, listing_id,
                          keyword, match_type,
                          impressions, clicks, ctr, avg_cpc, ad_spend,
@@ -642,9 +658,8 @@ class AdPerformanceSync:
                          total_quantity, direct_quantity, indirect_quantity,
                          bid_type, sales_method, ad_type, option_id,
                          ad_name, placement, creative_id, category,
-                         report_type)
-                        VALUES
-                        (:account_id, :ad_date, :campaign_id, :campaign_name, :ad_group_name,
+                         report_type)"""
+        _vals = """(:account_id, :ad_date, :campaign_id, :campaign_name, :ad_group_name,
                          :coupang_product_id, :product_name, :listing_id,
                          :keyword, :match_type,
                          :impressions, :clicks, :ctr, :avg_cpc, :ad_spend,
@@ -653,8 +668,32 @@ class AdPerformanceSync:
                          :total_quantity, :direct_quantity, :indirect_quantity,
                          :bid_type, :sales_method, :ad_type, :option_id,
                          :ad_name, :placement, :creative_id, :category,
-                         :report_type)
-                    """), {
+                         :report_type)"""
+
+        if is_pg:
+            _update_cols = ", ".join(
+                f"{c} = EXCLUDED.{c}" for c in [
+                    "campaign_name", "ad_group_name", "product_name", "listing_id",
+                    "match_type", "impressions", "clicks", "ctr", "avg_cpc", "ad_spend",
+                    "direct_orders", "direct_revenue", "indirect_orders", "indirect_revenue",
+                    "total_orders", "total_revenue", "roas",
+                    "total_quantity", "direct_quantity", "indirect_quantity",
+                    "bid_type", "sales_method", "ad_type", "option_id",
+                    "ad_name", "placement", "creative_id", "category",
+                ]
+            )
+            sql = f"""INSERT INTO ad_performances {_cols} VALUES {_vals}
+                ON CONFLICT (account_id, ad_date, campaign_id, ad_group_name,
+                             coupang_product_id, keyword, report_type)
+                DO UPDATE SET {_update_cols}"""
+        else:
+            sql = f"INSERT OR REPLACE INTO ad_performances {_cols} VALUES {_vals}"
+
+        upserted = 0
+        with self.engine.connect() as conn:
+            for row in rows:
+                try:
+                    conn.execute(text(sql), {
                         "account_id": account_id,
                         "ad_date": row["ad_date"].isoformat(),
                         "campaign_id": row["campaign_id"],
