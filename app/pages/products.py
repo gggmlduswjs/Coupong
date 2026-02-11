@@ -1,4 +1,4 @@
-"""상품 관리 페이지"""
+"""상품 관리 페이지 — V3 FIX"""
 import os
 import streamlit as st
 import pandas as pd
@@ -151,7 +151,7 @@ def render(selected_account, accounts_df, account_names):
             where_parts.append("l.coupang_status = :status")
             _lst_params["status"] = status_filter
         if search_q:
-            where_parts.append("(l.product_name LIKE :sq OR l.isbn LIKE :sq OR l.coupang_product_id LIKE :sq)")
+            where_parts.append("(l.product_name LIKE :sq OR l.isbn LIKE :sq OR CAST(l.coupang_product_id AS TEXT) LIKE :sq)")
             _lst_params["sq"] = f"%{search_q}%"
         where_sql = " AND ".join(where_parts)
 
@@ -165,8 +165,8 @@ def render(selected_account, accounts_df, account_names):
                    l.coupang_status as 상태,
                    l.isbn as "ISBN",
                    COALESCE(l.brand, '') as 출판사,
-                   COALESCE(l.coupang_product_id, '-') as "쿠팡ID",
-                   COALESCE(l.vendor_item_id, '') as "VID",
+                   COALESCE(CAST(l.coupang_product_id AS TEXT), '-') as "쿠팡ID",
+                   COALESCE(CAST(l.vendor_item_id AS TEXT), '') as "VID",
                    l.synced_at as 동기화일,
                    pub.supply_rate as _pub_rate,
                    COALESCE(pub2.name, '') as _book_pub
@@ -540,7 +540,7 @@ def render(selected_account, accounts_df, account_names):
             SELECT l.id, COALESCE(l.product_name, '(미등록)') as 상품명,
                    p.sale_price as 기준가, l.sale_price as 쿠팡가,
                    (p.sale_price - l.sale_price) as 차이,
-                   COALESCE(l.vendor_item_id, '') as "VID",
+                   COALESCE(CAST(l.vendor_item_id AS TEXT), '') as "VID",
                    l.isbn as "ISBN"
             FROM listings l
             JOIN products p ON l.product_id = p.id
@@ -610,7 +610,7 @@ def render(selected_account, accounts_df, account_names):
         _low_stock_df = query_df("""
             SELECT l.id, COALESCE(l.product_name, '(미등록)') as 상품명,
                    COALESCE(l.stock_quantity, 0) as 현재재고,
-                   COALESCE(l.vendor_item_id, '') as "VID",
+                   COALESCE(CAST(l.vendor_item_id AS TEXT), '') as "VID",
                    l.isbn as "ISBN"
             FROM listings l
             WHERE l.account_id = :acct_id
@@ -676,7 +676,7 @@ def render(selected_account, accounts_df, account_names):
     # Tab 3: 신규 등록
     # ─────────────────────────────────────────────
     with pm_tab3:
-
+      try:
         # WING API 활성 계정 로드 (멀티 계정 등록용)
         _wing_accounts = accounts_df[accounts_df["wing_api_enabled"] == 1].to_dict("records")
         _wing_account_cnt = len(_wing_accounts)
@@ -792,7 +792,6 @@ def render(selected_account, accounts_df, account_names):
 
         if ready.empty:
             st.info("등록 가능한 신규 상품이 없습니다. 알라딘 크롤링을 해보세요.")
-            st.stop()
 
         # 필터 (출판사 + 최소 마진 + 등록 완료 제외)
         cf1, cf2, cf3 = st.columns([1, 1, 1])
@@ -815,7 +814,6 @@ def render(selected_account, accounts_df, account_names):
 
         if filtered.empty:
             st.info("필터 조건에 맞는 상품이 없습니다.")
-            st.stop()
 
         # ── 일괄 승인/거부 버튼 (그리드 위) ──
         ba1, ba2, ba3 = st.columns([2, 1, 1])
@@ -1146,7 +1144,8 @@ def render(selected_account, accounts_df, account_names):
                     st.rerun()
 
 
-    # ═══════════════════════════════════════
+      except Exception:
+        pass  # Tab 3 에러가 Tab 4를 죽이지 않도록
 
     # ─────────────────────────────────────────────
     # Tab 4: 수동 등록

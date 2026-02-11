@@ -22,10 +22,10 @@ from sqlalchemy import text
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
-from app.database import get_engine_for_db
-
 from dotenv import load_dotenv
 load_dotenv(ROOT / ".env")
+
+from app.database import get_engine_for_db
 
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
