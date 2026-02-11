@@ -1,5 +1,6 @@
 # Dashboard
 streamlit>=1.28.0
+streamlit-aggrid>=1.0.0
 plotly>=5.18.0
 altair>=5.1.0
 
