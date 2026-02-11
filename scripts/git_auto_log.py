@@ -2,9 +2,15 @@
 # Git hook에서 호출되어 커밋 내용을 Obsidian에 자동 기록
 
 import sys
+import io
 import subprocess
 from datetime import datetime
 from pathlib import Path
+
+# Windows cp949 콘솔에서 유니코드 출력 에러 방지
+if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 # 프로젝트 루트 경로 추가
 project_root = Path(__file__).parent.parent
