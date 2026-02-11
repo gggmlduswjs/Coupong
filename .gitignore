@@ -35,7 +35,7 @@ wheels/
 *.sqlite3
 
 # Streamlit secrets
-.streamlit/secrets.toml
+.streamlit/
 
 # Sessions (계정 세션 파일)
 sessions/*
