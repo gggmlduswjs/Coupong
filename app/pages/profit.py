@@ -75,10 +75,19 @@ def _query_daily_revenue(d_from, d_to, acct_where):
                     CAST(NULLIF(l.original_price, 0) * {DEFAULT_SUPPLY_RATE} AS INTEGER),
                     0
                 ) * r.quantity
+            WHEN r.sale_type='REFUND' THEN
+                -COALESCE(
+                    NULLIF(l.supply_price, 0),
+                    CAST(p.list_price * p.supply_rate AS INTEGER),
+                    CAST(NULLIF(l.original_price, 0) * {DEFAULT_SUPPLY_RATE} AS INTEGER),
+                    0
+                ) * r.quantity
             ELSE 0 END) as 원가,
-            SUM(CASE WHEN r.sale_type='SALE'
+            SUM(CASE
+                WHEN r.sale_type IN ('SALE', 'REFUND')
                 AND (NULLIF(l.supply_price, 0) IS NOT NULL OR p.supply_rate IS NOT NULL OR NULLIF(l.original_price, 0) IS NOT NULL)
-                THEN r.quantity ELSE 0 END) as 원가매칭수량
+                THEN CASE WHEN r.sale_type='SALE' THEN r.quantity ELSE -r.quantity END
+            ELSE 0 END) as 원가매칭수량
         FROM revenue_history r
         LEFT JOIN listings l ON r.listing_id = l.id
         LEFT JOIN products p ON l.product_id = p.id
@@ -387,6 +396,13 @@ def _render_account_compare(date_from_str, date_to_str):
                     CAST(NULLIF(l.original_price, 0) * {DEFAULT_SUPPLY_RATE} AS INTEGER),
                     0
                 ) * r.quantity
+            WHEN r.sale_type='REFUND' THEN
+                -COALESCE(
+                    NULLIF(l.supply_price, 0),
+                    CAST(p.list_price * p.supply_rate AS INTEGER),
+                    CAST(NULLIF(l.original_price, 0) * {DEFAULT_SUPPLY_RATE} AS INTEGER),
+                    0
+                ) * r.quantity
             ELSE 0 END) as 원가,
             SUM(CASE WHEN r.sale_type='SALE' THEN r.quantity ELSE 0 END) as 판매수량
         FROM revenue_history r
@@ -477,6 +493,13 @@ def _render_product_profit(acct_id, account_name, date_from_str, date_to_str, to
             SUM(CASE WHEN r.sale_type='SALE' THEN r.settlement_amount ELSE -r.settlement_amount END) as 정산,
             SUM(CASE WHEN r.sale_type='SALE' THEN
                 COALESCE(
+                    NULLIF(l.supply_price, 0),
+                    CAST(p.list_price * p.supply_rate AS INTEGER),
+                    CAST(NULLIF(l.original_price, 0) * {DEFAULT_SUPPLY_RATE} AS INTEGER),
+                    0
+                ) * r.quantity
+            WHEN r.sale_type='REFUND' THEN
+                -COALESCE(
                     NULLIF(l.supply_price, 0),
                     CAST(p.list_price * p.supply_rate AS INTEGER),
                     CAST(NULLIF(l.original_price, 0) * {DEFAULT_SUPPLY_RATE} AS INTEGER),
