@@ -24,7 +24,7 @@ from sqlalchemy import text
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
-from app.database import get_engine_for_db
+from app.database import get_engine_for_db, _is_postgresql
 
 from dotenv import load_dotenv
 load_dotenv(ROOT / ".env")

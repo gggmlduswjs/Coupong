@@ -30,6 +30,8 @@ DB_PATH = ROOT / "coupang_auto.db"
 
 # 택배비 단가 (원)
 COURIER_COST = 2300
+# product 없는 listings의 추정 공급률 (평균)
+DEFAULT_SUPPLY_RATE = 0.6
 
 
 # ─── 헬퍼 ───
@@ -128,10 +130,15 @@ def _query_daily_revenue(d_from, d_to, acct_where):
             SUM(CASE WHEN r.sale_type='SALE' THEN r.quantity ELSE 0 END) as 판매수량,
             SUM(CASE WHEN r.sale_type='REFUND' THEN r.quantity ELSE 0 END) as 환불수량,
             SUM(CASE WHEN r.sale_type='SALE' THEN
-                COALESCE(NULLIF(l.supply_price, 0), CAST(p.list_price * p.supply_rate AS INTEGER), 0) * r.quantity
+                COALESCE(
+                    NULLIF(l.supply_price, 0),
+                    CAST(p.list_price * p.supply_rate AS INTEGER),
+                    CAST(NULLIF(l.original_price, 0) * {DEFAULT_SUPPLY_RATE} AS INTEGER),
+                    0
+                ) * r.quantity
             ELSE 0 END) as 원가,
             SUM(CASE WHEN r.sale_type='SALE'
-                AND (NULLIF(l.supply_price, 0) IS NOT NULL OR p.supply_rate IS NOT NULL)
+                AND (NULLIF(l.supply_price, 0) IS NOT NULL OR p.supply_rate IS NOT NULL OR NULLIF(l.original_price, 0) IS NOT NULL)
                 THEN r.quantity ELSE 0 END) as 원가매칭수량
         FROM revenue_history r
         LEFT JOIN listings l ON r.listing_id = l.id
@@ -438,7 +445,12 @@ def _render_account_compare(date_from_str, date_to_str):
             SUM(CASE WHEN r.sale_type='SALE' THEN r.sale_amount ELSE -r.sale_amount END) as 매출,
             SUM(CASE WHEN r.sale_type='SALE' THEN r.settlement_amount ELSE -r.settlement_amount END) as 정산,
             SUM(CASE WHEN r.sale_type='SALE' THEN
-                COALESCE(NULLIF(l.supply_price, 0), CAST(p.list_price * p.supply_rate AS INTEGER), 0) * r.quantity
+                COALESCE(
+                    NULLIF(l.supply_price, 0),
+                    CAST(p.list_price * p.supply_rate AS INTEGER),
+                    CAST(NULLIF(l.original_price, 0) * {DEFAULT_SUPPLY_RATE} AS INTEGER),
+                    0
+                ) * r.quantity
             ELSE 0 END) as 원가,
             SUM(CASE WHEN r.sale_type='SALE' THEN r.quantity ELSE 0 END) as 판매수량
         FROM revenue_history r
@@ -528,7 +540,12 @@ def _render_product_profit(acct_id, account_name, date_from_str, date_to_str, to
             SUM(CASE WHEN r.sale_type='SALE' THEN r.sale_amount ELSE -r.sale_amount END) as 매출,
             SUM(CASE WHEN r.sale_type='SALE' THEN r.settlement_amount ELSE -r.settlement_amount END) as 정산,
             SUM(CASE WHEN r.sale_type='SALE' THEN
-                COALESCE(NULLIF(l.supply_price, 0), CAST(p.list_price * p.supply_rate AS INTEGER), 0) * r.quantity
+                COALESCE(
+                    NULLIF(l.supply_price, 0),
+                    CAST(p.list_price * p.supply_rate AS INTEGER),
+                    CAST(NULLIF(l.original_price, 0) * {DEFAULT_SUPPLY_RATE} AS INTEGER),
+                    0
+                ) * r.quantity
             ELSE 0 END) as 원가
         FROM revenue_history r
         LEFT JOIN listings l ON r.listing_id = l.id

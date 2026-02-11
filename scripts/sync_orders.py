@@ -24,7 +24,7 @@ from sqlalchemy import text
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
-from app.database import get_engine_for_db
+from app.database import get_engine_for_db, _is_postgresql
 
 from dotenv import load_dotenv
 load_dotenv(ROOT / ".env")
@@ -96,11 +96,21 @@ class OrderSync:
 
     def _ensure_table(self):
         """테이블이 없으면 생성"""
-        with self.engine.connect() as conn:
-            conn.execute(text(self.CREATE_TABLE_SQL))
-            for idx_sql in self.CREATE_INDEXES_SQL:
-                conn.execute(text(idx_sql))
-            conn.commit()
+        if _is_postgresql(str(self.engine.url)):
+            # PG는 ORM이 이미 테이블 생성함 — 인덱스만 확인
+            with self.engine.connect() as conn:
+                for idx_sql in self.CREATE_INDEXES_SQL:
+                    try:
+                        conn.execute(text(idx_sql))
+                    except Exception:
+                        pass
+                conn.commit()
+        else:
+            with self.engine.connect() as conn:
+                conn.execute(text(self.CREATE_TABLE_SQL))
+                for idx_sql in self.CREATE_INDEXES_SQL:
+                    conn.execute(text(idx_sql))
+                conn.commit()
         logger.info("orders 테이블 확인 완료")
 
     def _get_accounts(self, account_name: str = None) -> list:

@@ -642,7 +642,7 @@ class AdPerformanceSync:
         return rows
 
     def save_to_db(self, account_id: int, rows: List[dict]) -> int:
-        """UPSERT로 DB 저장 (SQLite: INSERT OR REPLACE, PG: ON CONFLICT DO UPDATE)"""
+        """UPSERT로 DB 저장 — 배치 처리 (PostgreSQL 원격 DB 최적화)"""
         if not rows:
             return 0
 
@@ -689,49 +689,64 @@ class AdPerformanceSync:
         else:
             sql = f"INSERT OR REPLACE INTO ad_performances {_cols} VALUES {_vals}"
 
+        def _make_params(row):
+            return {
+                "account_id": account_id,
+                "ad_date": row["ad_date"].isoformat(),
+                "campaign_id": row["campaign_id"],
+                "campaign_name": row["campaign_name"],
+                "ad_group_name": row["ad_group_name"],
+                "coupang_product_id": row["coupang_product_id"],
+                "product_name": row["product_name"],
+                "listing_id": row.get("listing_id"),
+                "keyword": row["keyword"],
+                "match_type": row["match_type"],
+                "impressions": row["impressions"],
+                "clicks": row["clicks"],
+                "ctr": row["ctr"],
+                "avg_cpc": row["avg_cpc"],
+                "ad_spend": row["ad_spend"],
+                "direct_orders": row["direct_orders"],
+                "direct_revenue": row["direct_revenue"],
+                "indirect_orders": row["indirect_orders"],
+                "indirect_revenue": row["indirect_revenue"],
+                "total_orders": row["total_orders"],
+                "total_revenue": row["total_revenue"],
+                "roas": row["roas"],
+                "total_quantity": row["total_quantity"],
+                "direct_quantity": row["direct_quantity"],
+                "indirect_quantity": row["indirect_quantity"],
+                "bid_type": row["bid_type"],
+                "sales_method": row["sales_method"],
+                "ad_type": row["ad_type"],
+                "option_id": row["option_id"],
+                "ad_name": row["ad_name"],
+                "placement": row["placement"],
+                "creative_id": row["creative_id"],
+                "category": row["category"],
+                "report_type": row["report_type"],
+            }
+
+        BATCH_SIZE = 500
         upserted = 0
         with self.engine.connect() as conn:
-            for row in rows:
+            for i in range(0, len(rows), BATCH_SIZE):
+                batch = rows[i:i + BATCH_SIZE]
+                params_list = [_make_params(r) for r in batch]
                 try:
-                    conn.execute(text(sql), {
-                        "account_id": account_id,
-                        "ad_date": row["ad_date"].isoformat(),
-                        "campaign_id": row["campaign_id"],
-                        "campaign_name": row["campaign_name"],
-                        "ad_group_name": row["ad_group_name"],
-                        "coupang_product_id": row["coupang_product_id"],
-                        "product_name": row["product_name"],
-                        "listing_id": row.get("listing_id"),
-                        "keyword": row["keyword"],
-                        "match_type": row["match_type"],
-                        "impressions": row["impressions"],
-                        "clicks": row["clicks"],
-                        "ctr": row["ctr"],
-                        "avg_cpc": row["avg_cpc"],
-                        "ad_spend": row["ad_spend"],
-                        "direct_orders": row["direct_orders"],
-                        "direct_revenue": row["direct_revenue"],
-                        "indirect_orders": row["indirect_orders"],
-                        "indirect_revenue": row["indirect_revenue"],
-                        "total_orders": row["total_orders"],
-                        "total_revenue": row["total_revenue"],
-                        "roas": row["roas"],
-                        "total_quantity": row["total_quantity"],
-                        "direct_quantity": row["direct_quantity"],
-                        "indirect_quantity": row["indirect_quantity"],
-                        "bid_type": row["bid_type"],
-                        "sales_method": row["sales_method"],
-                        "ad_type": row["ad_type"],
-                        "option_id": row["option_id"],
-                        "ad_name": row["ad_name"],
-                        "placement": row["placement"],
-                        "creative_id": row["creative_id"],
-                        "category": row["category"],
-                        "report_type": row["report_type"],
-                    })
-                    upserted += 1
+                    conn.execute(text(sql), params_list)
+                    upserted += len(batch)
                 except Exception as e:
-                    logger.debug(f"INSERT 스킵: {e}")
+                    # 배치 실패 시 개별 INSERT로 폴백
+                    logger.warning(f"배치 INSERT 실패 (batch {i//BATCH_SIZE}), 개별 처리: {e}")
+                    for params in params_list:
+                        try:
+                            conn.execute(text(sql), params)
+                            upserted += 1
+                        except Exception as e2:
+                            logger.debug(f"INSERT 스킵: {e2}")
+                if (i + BATCH_SIZE) % 5000 == 0 or i + BATCH_SIZE >= len(rows):
+                    logger.info(f"진행: {min(i + BATCH_SIZE, len(rows)):,}/{len(rows):,}건")
 
             conn.commit()
 
