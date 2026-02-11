@@ -36,7 +36,7 @@ def register_accounts():
             account_pw = os.getenv(f"COUPANG_PW_{i}")
 
             if not account_id or not account_pw:
-                print(f"⚠️  계정 {i} 정보 없음 (건너뜀)")
+                print(f"[WARN]계정 {i} 정보 없음 (건너뜀)")
                 continue
 
             accounts_data.append({
@@ -62,7 +62,7 @@ def register_accounts():
                 existing.email = data["email"]
                 existing.password_encrypted = encryptor.encrypt(data["password"])
                 existing.updated_at = datetime.utcnow()
-                print(f"🔄 업데이트: {data['name']} ({data['email']})")
+                print(f"[UPD] 업데이트: {data['name']} ({data['email']})")
                 updated_count += 1
             else:
                 # 새로 등록
@@ -73,26 +73,26 @@ def register_accounts():
                     is_active=True
                 )
                 db.add(account)
-                print(f"✅ 신규 등록: {data['name']} ({data['email']})")
+                print(f"[OK]신규 등록: {data['name']} ({data['email']})")
                 registered_count += 1
 
         db.commit()
 
         print("\n" + "="*60)
-        print(f"✅ 등록 완료!")
+        print(f"[OK]등록 완료!")
         print(f"   신규: {registered_count}개")
         print(f"   업데이트: {updated_count}개")
         print("="*60)
 
         # 등록된 계정 확인
-        print("\n📋 등록된 계정 목록:")
+        print("\n등록된 계정 목록:")
         accounts = db.query(Account).all()
         for acc in accounts:
-            status = "🟢 활성" if acc.is_active else "🔴 비활성"
+            status = "[활성]" if acc.is_active else "[비활성]"
             print(f"   {status} {acc.account_name}: {acc.email}")
 
     except Exception as e:
-        print(f"❌ 오류 발생: {e}")
+        print(f"[ERR]오류 발생: {e}")
         db.rollback()
         raise
     finally:
@@ -112,7 +112,7 @@ def test_encryption():
     print(f"원본: {test_password}")
     print(f"암호화: {encrypted[:50]}...")
     print(f"복호화: {decrypted}")
-    print(f"일치: {'✅ 성공' if test_password == decrypted else '❌ 실패'}")
+    print(f"일치: {'성공' if test_password == decrypted else '실패'}")
 
 
 if __name__ == "__main__":
@@ -122,7 +122,7 @@ if __name__ == "__main__":
     # 계정 등록
     register_accounts()
 
-    print("\n🎉 완료! 이제 계정 정보가 안전하게 암호화되어 저장되었습니다.")
+    print("\n완료! 이제 계정 정보가 안전하게 암호화되어 저장되었습니다.")
     print("\n다음 단계:")
     print("1. python scripts/quick_start.py  # 크롤링 테스트")
     print("2. python scripts/test_login.py   # 로그인 테스트 (선택)")

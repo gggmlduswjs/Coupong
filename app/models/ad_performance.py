@@ -1,5 +1,6 @@
 """광고 성과 상세 모델 (광고센터 보고서 기반)"""
 from sqlalchemy import Column, Integer, String, Float, ForeignKey, Date, DateTime, UniqueConstraint, Index
+from sqlalchemy.orm import relationship
 from datetime import datetime
 from app.database import Base
 
@@ -72,6 +73,11 @@ class AdPerformance(Base):
 
     # 메타
     report_type = Column(String(20), default="campaign")  # product, keyword, brand, display, campaign
+
+    # Relationships
+    account = relationship("Account", backref="ad_performances")
+    listing = relationship("Listing", back_populates="ad_performances")
+
     created_at = Column(DateTime, default=datetime.utcnow)
 
     def __repr__(self):

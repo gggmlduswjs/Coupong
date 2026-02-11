@@ -32,7 +32,7 @@ def query_df(sql: str, params: dict = None) -> pd.DataFrame:
 
 def get_publisher_names() -> list:
     """활성 출판사 목록 (긴 이름 우선)"""
-    df = query_df("SELECT name FROM publishers WHERE is_active = 1 ORDER BY LENGTH(name) DESC")
+    df = query_df("SELECT name FROM publishers WHERE is_active = true ORDER BY LENGTH(name) DESC")
     return df["name"].tolist() if not df.empty else []
 
 

@@ -11,8 +11,6 @@ class Listing(Base):
 
     __tablename__ = "listings"
     __table_args__ = (
-        # 중복 방지: 동일 계정 + 동일 ISBN
-        UniqueConstraint("account_id", "isbn", name="uix_account_isbn"),
         # 중복 방지: 동일 계정 + 동일 묶음키
         UniqueConstraint("account_id", "bundle_key", name="uix_account_bundle"),
     )
@@ -77,6 +75,10 @@ class Listing(Base):
     bundle = relationship("BundleSKU", back_populates="listings")
     sales = relationship("Sales", back_populates="listing")
     analysis_results = relationship("AnalysisResult", back_populates="listing")
+    orders = relationship("Order", back_populates="listing")
+    revenue_history = relationship("RevenueHistory", back_populates="listing")
+    return_requests = relationship("ReturnRequest", back_populates="listing")
+    ad_performances = relationship("AdPerformance", back_populates="listing")
 
     def __repr__(self):
         if self.product_type == 'single':

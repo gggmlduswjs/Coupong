@@ -83,8 +83,8 @@ def update_product_with_isbn(client, product_id, isbns):
 with engine.connect() as conn:
     # 007-book 계정만 처리
     accounts = conn.execute(text(
-        'SELECT id, vendor_id, wing_access_key, wing_secret_key '
-        'FROM accounts WHERE is_active=1 AND wing_api_enabled=1 AND account_name="007-book"'
+        "SELECT id, vendor_id, wing_access_key, wing_secret_key "
+        "FROM accounts WHERE is_active=true AND wing_api_enabled=true AND account_name='007-book'"
     )).fetchall()
 
     if not accounts:

@@ -62,7 +62,7 @@ with engine.connect() as conn:
     # 계정별 클라이언트
     accounts = conn.execute(text(
         'SELECT id, account_name, vendor_id, wing_access_key, wing_secret_key '
-        'FROM accounts WHERE is_active=1 AND wing_api_enabled=1'
+        'FROM accounts WHERE is_active=true AND wing_api_enabled=true'
     )).fetchall()
 
     clients = {}
@@ -125,8 +125,7 @@ with engine.connect() as conn:
             if final_isbn:
                 book = conn.execute(text('SELECT id, image_url FROM books WHERE isbn=:isbn'), {'isbn': final_isbn}).first()
             if not book and pname:
-                safe_name = pname.replace("'", "''")
-                book = conn.execute(text(f"SELECT id, image_url FROM books WHERE title='{safe_name}'")).first()
+                book = conn.execute(text("SELECT id, image_url FROM books WHERE title=:title"), {'title': pname}).first()
 
             if book:
                 # 이미지 업데이트

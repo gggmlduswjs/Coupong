@@ -7,7 +7,7 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from app.database import engine, SessionLocal, Base
-from app.models import Publisher, Book, Product, BundleSKU, Listing, Account, Sales, AnalysisResult, Task
+from app.models import Publisher, Book, Product, BundleSKU, Listing, Account, Sales, AnalysisResult
 
 
 def init_database():

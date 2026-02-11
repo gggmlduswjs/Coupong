@@ -719,8 +719,18 @@ class SalesActivationAnalyzer:
         return "\n".join(self.report_lines)
 
     def save_to_obsidian(self, report: str):
-        """Obsidian 노트에 저장"""
-        vault_dir = ROOT / "Coupong_vault" / "03-Technical"
+        """Obsidian 노트에 저장 (G: 직접)"""
+        def _vault_dir():
+            env = ROOT / ".env"
+            if env.exists():
+                for line in env.read_text(encoding="utf-8").splitlines():
+                    if line.strip().startswith("OBSIDIAN_VAULT_PATH="):
+                        v = line.split("=", 1)[1].strip().strip('"').strip("'")
+                        if v:
+                            return Path(v) / "10. project" / "Coupong" / "03-Technical"
+            return ROOT / "obsidian_vault" / "10. project" / "Coupong" / "03-Technical"
+
+        vault_dir = _vault_dir()
         vault_dir.mkdir(parents=True, exist_ok=True)
 
         filename = f"매출활성화-분석리포트-{self.today}.md"

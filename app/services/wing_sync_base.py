@@ -33,7 +33,7 @@ def get_accounts(engine: Engine, account_name: Optional[str] = None) -> List[Dic
     base_sql = """
         SELECT id, account_name, vendor_id, wing_access_key, wing_secret_key
         FROM accounts
-        WHERE is_active = 1 AND wing_api_enabled = 1
+        WHERE is_active = true AND wing_api_enabled = true
               AND vendor_id IS NOT NULL
               AND wing_access_key IS NOT NULL
               AND wing_secret_key IS NOT NULL

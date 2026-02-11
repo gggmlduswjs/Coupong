@@ -1,5 +1,5 @@
 """정산 내역 모델 (WING Settlement History API 원본 데이터)"""
-from sqlalchemy import Column, Integer, BigInteger, String, Float, ForeignKey, Date, DateTime, UniqueConstraint, Index
+from sqlalchemy import Column, Integer, BigInteger, String, Float, Text, ForeignKey, Date, DateTime, UniqueConstraint, Index
 from datetime import datetime
 from app.database import Base
 
@@ -48,7 +48,7 @@ class SettlementHistory(Base):
     bank_account = Column(String(50))
 
     # 원본 JSON
-    raw_json = Column(String)
+    raw_json = Column(Text)
 
     created_at = Column(DateTime, default=datetime.utcnow)
 

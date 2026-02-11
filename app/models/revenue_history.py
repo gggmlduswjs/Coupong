@@ -1,5 +1,6 @@
 """매출 내역 모델 (WING Revenue History API 원본 데이터)"""
 from sqlalchemy import Column, Integer, BigInteger, String, Float, ForeignKey, Date, DateTime, UniqueConstraint, Index
+from sqlalchemy.orm import relationship
 from datetime import datetime
 from app.database import Base
 
@@ -46,6 +47,10 @@ class RevenueHistory(Base):
 
     # 매칭
     listing_id = Column(Integer, ForeignKey("listings.id"))
+
+    # Relationships
+    account = relationship("Account", backref="revenue_history")
+    listing = relationship("Listing", back_populates="revenue_history")
 
     created_at = Column(DateTime, default=datetime.utcnow)
 

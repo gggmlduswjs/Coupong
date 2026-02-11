@@ -60,7 +60,7 @@ def pass1_wing_api(account_id=None, limit=0):
         acct_filter = f"AND account_name = '{account_id}'" if account_id else ""
         accounts = conn.execute(text(f"""
             SELECT id, account_name, vendor_id, wing_access_key, wing_secret_key
-            FROM accounts WHERE is_active=1 AND wing_api_enabled=1 {acct_filter}
+            FROM accounts WHERE is_active=true AND wing_api_enabled=true {acct_filter}
         """)).fetchall()
 
         if not accounts:
@@ -307,7 +307,7 @@ def print_coverage():
                    SUM(CASE WHEN l.isbn IS NOT NULL THEN 1 ELSE 0 END) as has_isbn
             FROM listings l
             JOIN accounts a ON l.account_id = a.id
-            WHERE a.is_active = 1
+            WHERE a.is_active = true
             GROUP BY a.account_name
         """)).fetchall()
 

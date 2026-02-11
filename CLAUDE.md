@@ -117,8 +117,9 @@ Account(1) → Listing(N)
 
 ## Obsidian 자동 기록 (필수)
 
-이 프로젝트는 `Coupong_vault/`에 개발 기록을 자동으로 남깁니다.
-**개발 작업을 수행할 때마다 반드시 Obsidian vault를 업데이트하세요. 사용자가 요청하지 않아도 자동으로 해야 합니다.**
+문서는 **Google Drive** `G:\내 드라이브\Obsidian\10. project\Coupong`에 있습니다.
+**모든 기록(일일 로그, 기술 문서 등)은 G:에 직접 저장됩니다.** sync 불필요.
+`.env`의 `OBSIDIAN_VAULT_PATH`로 경로 설정.
 
 ### 언제 기록하는가
 
@@ -133,7 +134,7 @@ Account(1) → Listing(N)
 
 **1. 일일 로그 (매 작업 후 필수)**
 
-`Coupong_vault/01-Daily/YYYY-MM-DD.md` 파일에 append:
+`G:/내 드라이브/Obsidian/10. project/Coupong/01-Daily/YYYY-MM-DD.md` 파일에 append:
 
 ```markdown
 ## HH:MM - 작업 제목
@@ -156,19 +157,19 @@ Account(1) → Listing(N)
 
 **2. 기능 노트 (새 기능 구현 시)**
 
-`Coupong_vault/02-Features/기능명.md`에 기능 문서 작성
+`G:/내 드라이브/Obsidian/10. project/Coupong/02-Features/기능명.md`에 기능 문서 작성
 
 **3. 기술 문서 (아키텍처 변경 시)**
 
-`Coupong_vault/03-Technical/문서명.md`에 기술 문서 작성
+`G:/내 드라이브/Obsidian/10. project/Coupong/03-Technical/문서명.md`에 기술 문서 작성
 
 **4. 의사결정 로그 (중요 결정 시)**
 
-`Coupong_vault/04-Decisions/결정명.md`에 배경, 결정, 대안 기록
+`G:/내 드라이브/Obsidian/10. project/Coupong/04-Decisions/결정명.md`에 배경, 결정, 대안 기록
 
 **5. 대화 기록 (중요 대화 종료 시 필수)**
 
-아래 조건에 해당하는 대화가 끝날 때, `Coupong_vault/06-Conversations/YYYY-MM-DD-주제.md`에 요약 기록:
+아래 조건에 해당하는 대화가 끝날 때, `G:/내 드라이브/Obsidian/10. project/Coupong/06-Conversations/YYYY-MM-DD-주제.md`에 요약 기록:
 
 기록 대상:
 - 새 기능 설계/구현을 논의한 대화

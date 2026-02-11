@@ -1,5 +1,6 @@
 """반품/취소 요청 모델 — WING Return Request API 데이터"""
 from sqlalchemy import Column, Integer, BigInteger, String, Boolean, ForeignKey, DateTime, Text, UniqueConstraint, Index
+from sqlalchemy.orm import relationship
 from datetime import datetime
 from app.database import Base
 
@@ -74,6 +75,10 @@ class ReturnRequest(Base):
 
     # 내부 매칭
     listing_id = Column(Integer, ForeignKey("listings.id"))
+
+    # Relationships
+    account = relationship("Account", backref="return_requests")
+    listing = relationship("Listing", back_populates="return_requests")
 
     # 타임스탬프
     created_at = Column(DateTime, default=datetime.utcnow)

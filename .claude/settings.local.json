@@ -126,7 +126,34 @@
       "Bash(ipconfig:*)",
       "Bash(more:*)",
       "Bash(npx supabase:*)",
-      "Bash(supabase:*)"
+      "Bash(supabase:*)",
+      "Bash(for i in 1 2 3 4)",
+      "Bash(do echo \"=== Account $i ===\")",
+      "Bash(done)",
+      "Bash(for i in 1 2 3 4 5)",
+      "Bash(do echo \"=== Account $i \\(80% similarity\\) ===\")",
+      "WebFetch(domain:ads.coupang.com)",
+      "mcp__ide__getDiagnostics",
+      "WebFetch(domain:sell.coupang.com)",
+      "WebFetch(domain:www.coupilot.net)",
+      "Bash(report)",
+      "Bash(data)",
+      "Bash(file\" || echo \"No matching directories found \")",
+      "Bash(git log:*)",
+      "Bash(git reset:*)",
+      "WebFetch(domain:advertising.coupang.com)",
+      "Bash(start /b python scripts/fill_isbn_kyobo_smart.py:*)",
+      "Bash(sc query:*)",
+      "Bash(reg query:*)",
+      "Bash(sc queryex:*)",
+      "Bash(\"C:/Program Files/Tailscale/tailscale.exe\" status)",
+      "Bash(\"C:/Program Files/Tailscale/tailscale.exe\" up)",
+      "Bash(\"C:/Program Files/Tailscale/tailscale.exe\" login)",
+      "Bash(start:*)",
+      "Bash(\"C:/Program Files/Tailscale/tailscale.exe\" serve status)",
+      "Bash(\"C:/Program Files/Tailscale/tailscale.exe\" serve:*)",
+      "Bash(\"C:/Program Files/Tailscale/tailscale.exe\" serve --bg --https=443 http://localhost:8503)",
+      "WebFetch(domain:desktop-iolofr8.tail1bf879.ts.net)"
     ]
   },
   "hooks": {
@@ -136,7 +163,7 @@
         "hooks": [
           {
             "type": "prompt",
-            "prompt": "방금 파일을 수정했습니다. 수정한 파일이 Coupong_vault/ 내부가 아닌 경우에만, C:\\Users\\MSI\\Desktop\\Coupong\\Coupong_vault\\01-Daily\\YYYY-MM-DD.md (오늘 날짜) 파일에 변경 내용을 간단히 append 하세요. 이미 이번 턴에서 기록했다면 스킵하세요. 절대 사용자에게 기록했다고 별도로 말하지 마세요.",
+            "prompt": "방금 파일을 수정했습니다. G:\\내 드라이브\\Obsidian\\10. project\\Coupong\\01-Daily\\YYYY-MM-DD.md (오늘 날짜) 파일에 변경 내용을 append하세요. 수정한 파일이 그 경로 내부가 아닌 경우에만. 이미 이번 턴에서 기록했다면 스킵. 사용자에게 기록했다고 말하지 마세요.",
             "timeout": 30
           }
         ]

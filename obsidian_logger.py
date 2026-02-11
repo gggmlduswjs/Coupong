@@ -18,14 +18,19 @@ class ObsidianLogger:
     def __init__(self, vault_path: str = None):
         """
         Args:
-            vault_path: Obsidian vault 경로 (기본: ./obsidian_vault)
+            vault_path: Obsidian vault 경로 (기본: .env의 OBSIDIAN_VAULT_PATH 또는 obsidian_vault)
         """
         if vault_path:
             self.vault = Path(vault_path)
         else:
-            self.vault = Path(__file__).parent / "obsidian_vault"
+            # .env의 OBSIDIAN_VAULT_PATH 사용 (G:에 직접 저장)
+            gdrive = self._load_gdrive_path()
+            if gdrive:
+                self.vault = gdrive
+            else:
+                self.vault = Path(__file__).parent / "obsidian_vault" / "10. project" / "Coupong"
 
-        # 디렉토리 구조 생성
+        # vault 없으면 기록 스킵 (G: 미연결 시)
         self.dirs = {
             "index": self.vault / "00-Index",
             "daily": self.vault / "01-Daily",
@@ -36,8 +41,26 @@ class ObsidianLogger:
             "database": self.vault / "06-Database",
         }
 
+    def _load_gdrive_path(self) -> Path | None:
+        """.env에서 OBSIDIAN_VAULT_PATH 로드"""
+        env_path = Path(__file__).parent / ".env"
+        if not env_path.exists():
+            return None
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line.startswith("OBSIDIAN_VAULT_PATH=") and "=" in line:
+                val = line.split("=", 1)[1].strip().strip('"').strip("'")
+                if val:
+                    return Path(val) / "10. project" / "Coupong"
+        return None
+
+    def _ensure_vault(self) -> bool:
+        """vault 존재 시 디렉터리 생성. 없으면 False (sync from 미실행)"""
+        if not self.vault.exists():
+            return False
         for dir_path in self.dirs.values():
             dir_path.mkdir(parents=True, exist_ok=True)
+        return True
 
     def get_daily_note_path(self) -> Path:
         """오늘의 일일 노트 경로"""
@@ -52,6 +75,8 @@ class ObsidianLogger:
             content: 로그 내용
             title: 제목 (없으면 시간)
         """
+        if not self._ensure_vault():
+            return
         daily_note = self.get_daily_note_path()
         now = datetime.now()
 
@@ -89,6 +114,8 @@ class ObsidianLogger:
             tags: 태그 리스트
             status: 상태 (진행중/완료/대기)
         """
+        if not self._ensure_vault():
+            return
         # 파일명 생성 (공백 제거)
         filename = feature_name.replace(" ", "-")
         feature_path = self.dirs["features"] / f"{filename}.md"
@@ -147,6 +174,8 @@ class ObsidianLogger:
             decision: 결정 내용
             alternatives: 고려한 대안들
         """
+        if not self._ensure_vault():
+            return
         filename = decision_title.replace(" ", "-")
         decision_path = self.dirs["decisions"] / f"{filename}.md"
 
@@ -202,6 +231,8 @@ class ObsidianLogger:
             content: 내용
             tags: 태그
         """
+        if not self._ensure_vault():
+            return
         filename = tech_name.replace(" ", "-")
         tech_path = self.dirs["technical"] / f"{filename}.md"
 
@@ -240,6 +271,8 @@ class ObsidianLogger:
             description: 설명
             solution: 해결 방법
         """
+        if not self._ensure_vault():
+            return
         solution_str = ""
         if solution:
             solution_str = f"\n## 해결 방법\n\n{solution}\n"

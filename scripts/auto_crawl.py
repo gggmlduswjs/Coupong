@@ -54,12 +54,24 @@ DB_TIMEOUT = 30          # SQLite timeout (대시보드 동시 접근 대비)
 MAX_ITEMS_SAFETY = 200   # 1회 실행당 최대 처리 아이템 (0=무제한)
 
 
-def log_to_obsidian(message: str, title: str = "자동 크롤링"):
-    """Obsidian daily note에 결과 기록"""
-    vault_dir = project_root / "Coupong_vault" / "01-Daily"
-    if not vault_dir.exists():
-        return
+def _get_vault_daily_dir():
+    """G: 우선, .env OBSIDIAN_VAULT_PATH"""
+    env_path = project_root / ".env"
+    if env_path.exists():
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            if line.strip().startswith("OBSIDIAN_VAULT_PATH="):
+                val = line.split("=", 1)[1].strip().strip('"').strip("'")
+                if val:
+                    return Path(val) / "10. project" / "Coupong" / "01-Daily"
+    return project_root / "obsidian_vault" / "10. project" / "Coupong" / "01-Daily"
 
+
+def log_to_obsidian(message: str, title: str = "자동 크롤링"):
+    """Obsidian daily note에 결과 기록 (G: 직접)"""
+    vault_dir = _get_vault_daily_dir()
+    if not vault_dir.parent.exists():  # G: Coupong 폴더 없으면 스킵
+        return
+    vault_dir.mkdir(parents=True, exist_ok=True)
     today = datetime.now().strftime("%Y-%m-%d")
     daily_file = vault_dir / f"{today}.md"
     now_time = datetime.now().strftime("%H:%M")

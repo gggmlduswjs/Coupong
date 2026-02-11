@@ -1,5 +1,6 @@
 """발주서(주문) 모델 — WING Ordersheet API 데이터"""
 from sqlalchemy import Column, Integer, BigInteger, String, Boolean, ForeignKey, DateTime, Text, UniqueConstraint, Index
+from sqlalchemy.orm import relationship
 from datetime import datetime
 from app.database import Base
 
@@ -66,6 +67,10 @@ class Order(Base):
 
     # 내부 매칭
     listing_id = Column(Integer, ForeignKey("listings.id"))
+
+    # Relationships
+    account = relationship("Account", backref="orders")
+    listing = relationship("Listing", back_populates="orders")
 
     # 원본 데이터
     raw_json = Column(Text)

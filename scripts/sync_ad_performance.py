@@ -78,10 +78,14 @@ COLUMN_MAP = {
     # 광고 구분 — 상품광고 보고서
     "입찰유형": "bid_type",
     "입찰 유형": "bid_type",
+    "과금 방식": "bid_type",
+    "과금방식": "bid_type",
     "판매방식": "sales_method",
     "판매 방식": "sales_method",
     "광고유형": "ad_type",
     "광고 유형": "ad_type",
+    "광고 노출 지면": "placement",
+    "광고노출지면": "placement",
 
     # 브랜드광고 보고서 전용
     "광고명": "ad_name",
@@ -176,14 +180,26 @@ COLUMN_MAP = {
 # 기본명 → 영문 필드명 (접미사 제거 후 매핑)
 ATTRIBUTION_BASE = {
     "총주문수": "total_orders",
+    "총 주문수": "total_orders",
     "직접주문수": "direct_orders",
+    "직접 주문수": "direct_orders",
     "간접주문수": "indirect_orders",
+    "간접 주문수": "indirect_orders",
     "총판매수량": "total_quantity",
+    "총 판매수량": "total_quantity",
     "직접판매수량": "direct_quantity",
+    "직접 판매수량": "direct_quantity",
     "간접판매수량": "indirect_quantity",
+    "간접 판매수량": "indirect_quantity",
     "총전환매출액": "total_revenue",
+    "총 전환매출액": "total_revenue",
     "직접전환매출액": "direct_revenue",
+    "직접 전환매출액": "direct_revenue",
     "간접전환매출액": "indirect_revenue",
+    "간접 전환매출액": "indirect_revenue",
+    "총광고수익률": "roas",
+    "직접광고수익률": "roas_direct",
+    "간접광고수익률": "roas_indirect",
     "광고수익률": "roas",
 }
 
@@ -474,9 +490,28 @@ class AdPerformanceSync:
         logger.info(f"보고서 유형: {report_type} (파일: {Path(filepath).name})")
         logger.info(f"정규화된 컬럼: {df.columns.tolist()}")
 
+        # 날짜 컬럼 없는 전체 기간 보고서 처리
+        # 파일명에서 기간 추출: *_YYYYMMDD_YYYYMMDD.xlsx
+        fallback_date = None
+        if "ad_date" not in df.columns:
+            fname = Path(filepath).stem
+            m = re.search(r"(\d{8})_(\d{8})$", fname)
+            if m:
+                try:
+                    d_from = date(int(m.group(1)[:4]), int(m.group(1)[4:6]), int(m.group(1)[6:8]))
+                    d_to = date(int(m.group(2)[:4]), int(m.group(2)[4:6]), int(m.group(2)[6:8]))
+                    fallback_date = d_to  # 종료일 사용
+                    logger.info(f"날짜 컬럼 없음 → 파일명에서 기간 추출: {d_from} ~ {d_to}")
+                except ValueError:
+                    pass
+            if fallback_date is None:
+                logger.warning(f"날짜 컬럼 없고 파일명에서도 기간 추출 실패: {filepath}")
+
         rows = []
         for _, row in df.iterrows():
             ad_date = self._parse_date(row.get("ad_date"))
+            if ad_date is None:
+                ad_date = fallback_date
             if ad_date is None:
                 continue
 

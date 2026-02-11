@@ -14,7 +14,7 @@ import hashlib
 import urllib.parse
 from datetime import datetime, timezone
 import logging
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Callable, Tuple
 
 import requests
 
@@ -230,6 +230,67 @@ class CoupangWingClient:
 
         return result
 
+    def _paginate(
+        self,
+        fetch_fn: Callable[..., Dict],
+        fetch_kwargs: Dict[str, Any],
+        nested_keys: Tuple[str, str] = ("items", "items"),
+        token_param: str = "next_token",
+        use_has_next: bool = False,
+        max_pages: int = 0,
+        log_label: str = "페이지",
+    ) -> List[Dict]:
+        """
+        공통 페이지네이션 헬퍼.
+
+        Args:
+            fetch_fn: 호출할 메서드 (결과 dict 반환)
+            fetch_kwargs: fetch_fn에 전달할 기본 kwargs
+            nested_keys: data가 dict일 때 아이템 추출 키 (primary, fallback)
+            token_param: fetch_fn에 토큰을 전달할 kwarg 이름
+            use_has_next: True이면 result["hasNext"]로 종료 판단
+            max_pages: 최대 페이지 (0=무제한)
+            log_label: 로그용 라벨
+        """
+        all_data: List[Dict] = []
+        token = ""
+        page = 0
+
+        while True:
+            kwargs = fetch_kwargs.copy()
+            if token:
+                kwargs[token_param] = token
+
+            result = fetch_fn(**kwargs)
+            data = result.get("data", [])
+
+            if isinstance(data, list):
+                items = data
+            elif isinstance(data, dict):
+                items = data.get(nested_keys[0], data.get(nested_keys[1], []))
+            else:
+                items = []
+            all_data.extend(items)
+
+            page += 1
+            logger.info(f"  {log_label} {page}: {len(items)}건 (누적 {len(all_data)}건)")
+
+            # 종료 조건
+            if use_has_next and not result.get("hasNext", False):
+                break
+
+            # 토큰 추출 (상위 → 하위)
+            token = result.get("nextToken", "")
+            if not token and isinstance(data, dict):
+                token = data.get("nextToken", "")
+            if not token:
+                break
+            if max_pages > 0 and page >= max_pages:
+                logger.info(f"  최대 페이지({max_pages}) 도달, 중단")
+                break
+
+        return all_data
+
     # ─────────────────────────────────────────────
     # 상품 관리
     # ─────────────────────────────────────────────
@@ -258,45 +319,20 @@ class CoupangWingClient:
         Returns:
             전체 상품 리스트
         """
-        all_products = []
-        next_token = ""
-        page = 0
-
-        while True:
-            params = {
-                "vendorId": self.vendor_id,
-                "maxPerPage": str(max_per_page),
-            }
+        def _fetch(next_token: str = ""):
+            params = {"vendorId": self.vendor_id, "maxPerPage": str(max_per_page)}
             if next_token:
                 params["nextToken"] = next_token
+            return self._request("GET", self.SELLER_PRODUCTS_PATH, params=params)
 
-            path = f"{self.SELLER_PRODUCTS_PATH}"
-            result = self._request("GET", path, params=params)
-
-            data = result.get("data", [])
-            if isinstance(data, list):
-                all_products.extend(data)
-            elif isinstance(data, dict):
-                products = data.get("products", data.get("items", []))
-                all_products.extend(products)
-
-            # 다음 페이지 토큰 확인
-            next_token = result.get("nextToken", "")
-            if not next_token:
-                # data가 dict인 경우 내부에서 확인
-                if isinstance(data, dict):
-                    next_token = data.get("nextToken", "")
-
-            page += 1
-            logger.info(f"  페이지 {page}: {len(data) if isinstance(data, list) else len(products)}개 로드 (누적 {len(all_products)}개)")
-
-            if not next_token:
-                break
-            if max_pages > 0 and page >= max_pages:
-                logger.info(f"  최대 페이지({max_pages}) 도달, 중단")
-                break
-
-        return all_products
+        return self._paginate(
+            fetch_fn=_fetch,
+            fetch_kwargs={},
+            nested_keys=("products", "items"),
+            token_param="next_token",
+            max_pages=max_pages,
+            log_label="상품 페이지",
+        )
 
     def create_product(self, product_data: Dict[str, Any], dashboard_override: bool = False) -> Dict[str, Any]:
         """
@@ -470,10 +506,6 @@ class CoupangWingClient:
         """
         path = f"{self.VENDOR_ITEMS_PATH}/external-vendor-sku-codes/{external_vendor_sku_code}"
         return self._request("GET", path)
-
-    def stop_sale(self, vendor_item_id: int) -> Dict[str, Any]:
-        """(deprecated: stop_item_sale 사용 권장) 아이템별 판매 중지"""
-        return self.stop_item_sale(vendor_item_id)
 
     # ─────────────────────────────────────────────
     # 재고/가격 관리
@@ -836,28 +868,17 @@ class CoupangWingClient:
         Returns:
             전체 발주서 리스트
         """
-        all_data = []
-        next_token = ""
-        page = 0
-        while True:
-            result = self.get_ordersheets(created_at_from, created_at_to, status, next_token=next_token)
-            data = result.get("data", [])
-            if isinstance(data, list):
-                all_data.extend(data)
-            elif isinstance(data, dict):
-                items = data.get("orderSheets", data.get("items", []))
-                all_data.extend(items)
-                data = items
-            page += 1
-            logger.info(f"  발주서 페이지 {page}: {len(data) if isinstance(data, list) else '?'}건 (상태: {status})")
-
-            next_token = result.get("nextToken", "")
-            if not next_token:
-                if isinstance(result.get("data"), dict):
-                    next_token = result["data"].get("nextToken", "")
-            if not next_token:
-                break
-        return all_data
+        return self._paginate(
+            fetch_fn=self.get_ordersheets,
+            fetch_kwargs={
+                "created_at_from": created_at_from,
+                "created_at_to": created_at_to,
+                "status": status,
+            },
+            nested_keys=("orderSheets", "items"),
+            token_param="next_token",
+            log_label="발주서 페이지",
+        )
 
     def get_ordersheet_by_shipment(self, shipment_box_id: int) -> Dict[str, Any]:
         """
@@ -1204,29 +1225,19 @@ class CoupangWingClient:
         Returns:
             전체 반품 요청 리스트
         """
-        all_data = []
-        token = ""
-        page = 0
-        while True:
-            result = self.get_return_requests(
-                date_from, date_to, status=status,
-                cancel_type=cancel_type, token=token
-            )
-            data = result.get("data", [])
-            if isinstance(data, list):
-                all_data.extend(data)
-            elif isinstance(data, dict):
-                items = data.get("returnDtoList", data.get("items", []))
-                all_data.extend(items)
-            page += 1
-            logger.info(f"  반품 목록 페이지 {page}: {len(data) if isinstance(data, list) else '?'}건")
-
-            if not result.get("hasNext", False):
-                break
-            token = result.get("nextToken", "")
-            if not token:
-                break
-        return all_data
+        return self._paginate(
+            fetch_fn=self.get_return_requests,
+            fetch_kwargs={
+                "date_from": date_from,
+                "date_to": date_to,
+                "status": status,
+                "cancel_type": cancel_type,
+            },
+            nested_keys=("returnDtoList", "items"),
+            token_param="token",
+            use_has_next=True,
+            log_label="반품 페이지",
+        )
 
     def get_return_request(self, receipt_id: int) -> Dict[str, Any]:
         """

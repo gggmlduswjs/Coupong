@@ -8,12 +8,9 @@ os.chdir(os.path.join(os.path.dirname(__file__), '..'))
 from dotenv import load_dotenv
 load_dotenv()
 
-from sqlalchemy import text, create_engine
+from sqlalchemy import text
 from app.api.coupang_wing_client import CoupangWingClient
-
-# 백업 DB 사용
-DB_PATH = r'C:\Users\user\Desktop\Coupong\coupang_auto_backup.db'
-engine = create_engine(f'sqlite:///{DB_PATH}')
+from app.database import engine
 isbn_re = re.compile(r'97[89]\d{10}')
 
 
@@ -47,15 +44,15 @@ def extract_isbn_from_detail(detail):
 with engine.connect() as conn:
     # 007-book 계정만 처리
     accounts = conn.execute(text(
-        'SELECT id, vendor_id, wing_access_key, wing_secret_key '
-        'FROM accounts WHERE is_active=1 AND wing_api_enabled=1 AND account_name="007-book"'
+        "SELECT id, vendor_id, wing_access_key, wing_secret_key "
+        "FROM accounts WHERE is_active=true AND wing_api_enabled=true AND account_name='007-book'"
     )).fetchall()
 
     if not accounts:
         print('007-book 계정을 찾을 수 없습니다. 전체 계정으로 처리합니다.')
         accounts = conn.execute(text(
-            'SELECT id, vendor_id, wing_access_key, wing_secret_key '
-            'FROM accounts WHERE is_active=1 AND wing_api_enabled=1'
+            "SELECT id, vendor_id, wing_access_key, wing_secret_key "
+            "FROM accounts WHERE is_active=true AND wing_api_enabled=true"
         )).fetchall()
 
     clients = {}
