@@ -16,13 +16,13 @@ from datetime import datetime, date, timedelta
 from pathlib import Path
 from typing import List, Tuple, Optional, Callable
 
-from sqlalchemy import text, inspect
+from sqlalchemy import text
 
 # 프로젝트 루트
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
-from app.database import get_engine_for_db, _is_postgresql
+from app.database import get_engine_for_db
 
 from dotenv import load_dotenv
 load_dotenv(ROOT / ".env")
@@ -30,10 +30,7 @@ load_dotenv(ROOT / ".env")
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from app.api.coupang_wing_client import CoupangWingClient, CoupangWingError
-from app.constants import WING_ACCOUNT_ENV_MAP
-from app.services.wing_sync_base import get_accounts, create_wing_client
-from app.services.transaction_manager import atomic_operation
-from app.utils.sync_logger import SyncLogger
+from app.services.wing_sync_base import get_accounts, create_wing_client, match_listing
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -42,60 +39,47 @@ logger = logging.getLogger(__name__)
 class RevenueSync:
     """매출 내역 동기화 엔진"""
 
-    # revenue_history 테이블 DDL
-    CREATE_TABLE_SQL = """
-    CREATE TABLE IF NOT EXISTS revenue_history (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        account_id INTEGER NOT NULL REFERENCES accounts(id),
-        order_id BIGINT NOT NULL,
-        sale_type VARCHAR(10) NOT NULL,
-        sale_date DATE NOT NULL,
-        recognition_date DATE NOT NULL,
-        settlement_date DATE,
-        product_id BIGINT,
-        product_name VARCHAR(500),
-        vendor_item_id BIGINT,
-        vendor_item_name VARCHAR(500),
-        sale_price INTEGER DEFAULT 0,
-        quantity INTEGER DEFAULT 0,
-        coupang_discount INTEGER DEFAULT 0,
-        sale_amount INTEGER DEFAULT 0,
-        seller_discount INTEGER DEFAULT 0,
-        service_fee INTEGER DEFAULT 0,
-        service_fee_vat INTEGER DEFAULT 0,
-        service_fee_ratio REAL,
-        settlement_amount INTEGER DEFAULT 0,
-        delivery_fee_amount INTEGER DEFAULT 0,
-        delivery_fee_settlement INTEGER DEFAULT 0,
-        listing_id INTEGER REFERENCES listings(id),
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(account_id, order_id, vendor_item_id)
-    )
-    """
-
     CREATE_INDEXES_SQL = [
         "CREATE INDEX IF NOT EXISTS ix_rev_account_date ON revenue_history(account_id, recognition_date)",
         "CREATE INDEX IF NOT EXISTS ix_rev_recognition ON revenue_history(recognition_date)",
         "CREATE INDEX IF NOT EXISTS ix_rev_listing ON revenue_history(listing_id)",
     ]
 
+    UPSERT_SQL = """
+        INSERT INTO revenue_history
+            (account_id, order_id, sale_type, sale_date, recognition_date,
+             settlement_date, product_id, product_name, vendor_item_id,
+             vendor_item_name, sale_price, quantity, coupang_discount,
+             sale_amount, seller_discount, service_fee, service_fee_vat,
+             service_fee_ratio, settlement_amount, delivery_fee_amount,
+             delivery_fee_settlement, listing_id)
+        VALUES
+            (:account_id, :order_id, :sale_type, :sale_date, :recognition_date,
+             :settlement_date, :product_id, :product_name, :vendor_item_id,
+             :vendor_item_name, :sale_price, :quantity, :coupang_discount,
+             :sale_amount, :seller_discount, :service_fee, :service_fee_vat,
+             :service_fee_ratio, :settlement_amount, :delivery_fee_amount,
+             :delivery_fee_settlement, :listing_id)
+        ON CONFLICT (account_id, order_id, vendor_item_id) DO NOTHING
+    """
+
     def __init__(self, db_path: str = None):
         self.engine = get_engine_for_db(db_path)
         self._ensure_table()
 
     def _ensure_table(self):
-        """테이블이 없으면 생성 (PostgreSQL은 ORM 모델로 이미 존재하므로 스킵)"""
-        if "postgresql" in str(self.engine.url):
-            return
+        """인덱스 확인"""
         with self.engine.connect() as conn:
-            conn.execute(text(self.CREATE_TABLE_SQL))
             for idx_sql in self.CREATE_INDEXES_SQL:
-                conn.execute(text(idx_sql))
+                try:
+                    conn.execute(text(idx_sql))
+                except Exception:
+                    pass
             conn.commit()
         logger.info("revenue_history 테이블 확인 완료")
 
     def _get_accounts(self, account_name: str = None) -> list:
-        """WING API 활성화된 계정 목록 조회 (SQL 인젝션 방지)"""
+        """WING API 활성화된 계정 목록 조회"""
         return get_accounts(self.engine, account_name)
 
     def _create_client(self, account: dict) -> CoupangWingClient:
@@ -112,31 +96,6 @@ class RevenueSync:
             windows.append((current.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")))
             current = end + timedelta(days=1)
         return windows
-
-    def _match_listing(self, conn, account_id: int, product_id, vendor_item_id, product_name: str = None) -> Optional[int]:
-        """product_id, vendor_item_id, product_name으로 listings 매칭"""
-        # 1차: vendor_item_id 매칭 (가장 정확)
-        if vendor_item_id:
-            row = conn.execute(text(
-                "SELECT id FROM listings WHERE account_id = :aid AND vendor_item_id = :vid LIMIT 1"
-            ), {"aid": account_id, "vid": str(vendor_item_id)}).fetchone()
-            if row:
-                return row[0]
-        # 2차: coupang_product_id 매칭
-        if product_id:
-            row = conn.execute(text(
-                "SELECT id FROM listings WHERE account_id = :aid AND coupang_product_id = :pid LIMIT 1"
-            ), {"aid": account_id, "pid": str(product_id)}).fetchone()
-            if row:
-                return row[0]
-        # 3차: product_name 정확 매칭
-        if product_name:
-            row = conn.execute(text(
-                "SELECT id FROM listings WHERE account_id = :aid AND product_name = :name LIMIT 1"
-            ), {"aid": account_id, "name": product_name}).fetchone()
-            if row:
-                return row[0]
-        return None
 
     def _parse_date(self, date_str) -> Optional[str]:
         """날짜 문자열 파싱 (다양한 형식 지원)"""
@@ -193,9 +152,14 @@ class RevenueSync:
                         if not order_id or not v_item_id:
                             continue
 
-                        # listing 매칭
+                        # 3-level listing 매칭
                         p_name = item.get("productName") or item.get("vendorItemName", "")
-                        listing_id = self._match_listing(conn, account_id, p_id, v_item_id, p_name)
+                        listing_id = match_listing(
+                            conn, account_id,
+                            vendor_item_id=v_item_id,
+                            coupang_product_id=p_id,
+                            product_name=p_name
+                        )
                         if listing_id:
                             total_matched += 1
 
@@ -207,24 +171,7 @@ class RevenueSync:
                             continue
 
                         try:
-                            insert_sql = """
-                                INSERT INTO revenue_history
-                                (account_id, order_id, sale_type, sale_date, recognition_date,
-                                 settlement_date, product_id, product_name, vendor_item_id,
-                                 vendor_item_name, sale_price, quantity, coupang_discount,
-                                 sale_amount, seller_discount, service_fee, service_fee_vat,
-                                 service_fee_ratio, settlement_amount, delivery_fee_amount,
-                                 delivery_fee_settlement, listing_id)
-                                VALUES
-                                (:account_id, :order_id, :sale_type, :sale_date, :recognition_date,
-                                 :settlement_date, :product_id, :product_name, :vendor_item_id,
-                                 :vendor_item_name, :sale_price, :quantity, :coupang_discount,
-                                 :sale_amount, :seller_discount, :service_fee, :service_fee_vat,
-                                 :service_fee_ratio, :settlement_amount, :delivery_fee_amount,
-                                 :delivery_fee_settlement, :listing_id)
-                                ON CONFLICT (account_id, order_id, vendor_item_id) DO NOTHING
-                            """
-                            conn.execute(text(insert_sql), {
+                            conn.execute(text(self.UPSERT_SQL), {
                                 "account_id": account_id,
                                 "order_id": int(order_id),
                                 "sale_type": item.get("saleType", "SALE"),

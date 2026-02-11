@@ -140,13 +140,46 @@ def render(selected_account, accounts_df, account_names):
         st.session_state[ts_key] = now
         return result
 
+    def _clear_order_caches():
+        """주문 관련 캐시 전체 삭제"""
+        for _k in list(st.session_state.keys()):
+            if _k.startswith("_live_") or _k.startswith("_kpi_"):
+                del st.session_state[_k]
+
+    def _fetch_kpi_count(status, days=7, cache_ttl=120):
+        """KPI용: WING API에서 상태별 발주서 건수 조회 (묶음배송 단위, 계정별 dict)"""
+        cache_key = f"_kpi_{status}_{days}d"
+        ts_key = f"_kpi_{status}_{days}d_ts"
+        now = datetime.utcnow().timestamp()
+
+        if cache_key in st.session_state and (now - st.session_state.get(ts_key, 0)) < cache_ttl:
+            return st.session_state[cache_key]
+
+        counts = {}
+        _today = date.today()
+        _from = (_today - timedelta(days=days)).isoformat()
+        _to = _today.isoformat()
+
+        for _, acct in accounts_df.iterrows():
+            client = create_wing_client(acct)
+            if not client:
+                continue
+            try:
+                orders = client.get_all_ordersheets(_from, _to, status=status)
+                if orders:
+                    counts[acct["account_name"]] = len(orders)
+            except Exception:
+                continue
+
+        st.session_state[cache_key] = counts
+        st.session_state[ts_key] = now
+        return counts
+
     # ── 상단 컨트롤 ──
     _top_c1, _top_c2 = st.columns(2)
     with _top_c1:
         if st.button("캐시 새로고침", key="btn_live_refresh", use_container_width=True):
-            for _k in list(st.session_state.keys()):
-                if _k.startswith("_live_"):
-                    del st.session_state[_k]
+            _clear_order_caches()
             st.rerun()
     with _top_c2:
         if st.button("DB 주문 동기화 (당일)", key="btn_sync_orders", use_container_width=True):
@@ -191,11 +224,37 @@ def render(selected_account, accounts_df, account_names):
     _ord_date_to_str = date.today().isoformat()
     _ord_date_from_str = _ord_date_to_str
 
-    # ── 공유 데이터: ACCEPT + INSTRUCT (모든 탭에서 공유) ──
-    with st.spinner("주문 조회 중..."):
+    # ── 공유 데이터 + 실시간 KPI ──
+    with st.spinner("전 계정 주문 현황 조회 중..."):
         _accept_all = _fetch_live_orders("ACCEPT")
         _instruct_live = _fetch_live_orders("INSTRUCT")
+        _kpi_departure = _fetch_kpi_count("DEPARTURE", days=7, cache_ttl=120)
+        _kpi_delivering = _fetch_kpi_count("DELIVERING", days=30, cache_ttl=300)
+        _kpi_final = _fetch_kpi_count("FINAL_DELIVERY", days=30, cache_ttl=300)
     _instruct_all = _instruct_live[~_instruct_live["취소"]].copy() if not _instruct_live.empty else pd.DataFrame()
+
+    # KPI 계정별 집계
+    # 발주서(묶음배송) 단위 집계
+    _kpi_accept = _accept_all.groupby("계정")["묶음배송번호"].nunique().to_dict() if not _accept_all.empty else {}
+    _kpi_instruct = _instruct_all.groupby("계정")["묶음배송번호"].nunique().to_dict() if not _instruct_all.empty else {}
+
+    # ── 실시간 주문 현황 KPI ──
+    _kc1, _kc2, _kc3, _kc4, _kc5 = st.columns(5)
+
+    def _render_kpi(col, label, counts):
+        total = sum(counts.values())
+        col.metric(label, f"{total:,}건")
+        if counts:
+            parts = [f"{k}: {v}" for k, v in sorted(counts.items())]
+            col.caption(" | ".join(parts))
+
+    _render_kpi(_kc1, "결제완료", _kpi_accept)
+    _render_kpi(_kc2, "상품준비중", _kpi_instruct)
+    _render_kpi(_kc3, "배송지시", _kpi_departure)
+    _render_kpi(_kc4, "배송중", _kpi_delivering)
+    _render_kpi(_kc5, "배송완료(30일)", _kpi_final)
+
+    st.divider()
 
     # 묶음배송 단위 집계 (배송 탭에서 사용)
     if not _instruct_all.empty:
@@ -311,9 +370,7 @@ def render(selected_account, accounts_df, account_names):
                         _total_fail += len(_ack_ids)
 
                 if _total_success > 0:
-                    for _k in list(st.session_state.keys()):
-                        if _k.startswith("_live_"):
-                            del st.session_state[_k]
+                    _clear_order_caches()
                     st.rerun()
 
             # ── 주문 취소 ──
@@ -389,9 +446,7 @@ def render(selected_account, accounts_df, account_names):
                                                 )
                                                 _cancel_count += len(_vids)
                                         st.success(f"취소 요청 완료: {_cancel_count}건")
-                                        for _k in list(st.session_state.keys()):
-                                            if _k.startswith("_live_"):
-                                                del st.session_state[_k]
+                                        _clear_order_caches()
                                         st.rerun()
                                     except CoupangWingError as e:
                                         st.error(f"API 오류: {e}")
@@ -838,9 +893,7 @@ def render(selected_account, accounts_df, account_names):
 
                                     if _total_success > 0:
                                         st.success(f"송장 등록 완료: 총 {_total_success}건 성공" + (f", {_total_fail}건 실패" if _total_fail else ""))
-                                        for _k in list(st.session_state.keys()):
-                                            if _k.startswith("_live_"):
-                                                del st.session_state[_k]
+                                        _clear_order_caches()
                                         st.rerun()
                                     elif _total_fail > 0:
                                         st.error(f"전체 실패: {_total_fail}건")
@@ -861,35 +914,47 @@ def render(selected_account, accounts_df, account_names):
             with _gk_col2:
                 _gk_date_to = st.date_input("종료일", value=date.today(), key="tab4_gk_date_to")
             with _gk_col3:
-                _gk_status = st.selectbox("상태", ["DEPARTURE", "DELIVERING", "FINAL_DELIVERY"], key="tab4_gk_status")
+                _gk_status = st.selectbox("상태", ["INSTRUCT", "DEPARTURE", "DELIVERING", "FINAL_DELIVERY"], key="tab4_gk_status")
 
-            # WING API 실시간 조회
+            # WING API 실시간 조회 (INSTRUCT는 상단 캐시 재사용)
             _gk_from_str = _gk_date_from.isoformat()
             _gk_to_str = _gk_date_to.isoformat()
 
             _gk_api_rows = []
-            with st.spinner(f"{_gk_status} 주문 조회 중..."):
-                for _, _gk_acct in accounts_df.iterrows():
-                    _gk_client = create_wing_client(_gk_acct)
-                    if not _gk_client:
-                        continue
-                    try:
-                        _gk_result = _gk_client.get_all_ordersheets(_gk_from_str, _gk_to_str, status=_gk_status)
-                        for _gk_os in _gk_result:
-                            _gk_items = _gk_os.get("orderItems", [])
-                            if not _gk_items:
-                                _gk_items = [_gk_os]
-                            for _gk_item in _gk_items:
-                                _gk_api_rows.append({
-                                    "옵션명": _gk_item.get("vendorItemName", ""),
-                                    "상품명": _gk_item.get("sellerProductName") or _gk_os.get("sellerProductName", ""),
-                                    "수량": int(_gk_item.get("shippingCount", 0) or 0),
-                                    "결제금액": int(_gk_item.get("orderPrice", 0) or 0),
-                                    "_seller_product_id": _gk_item.get("sellerProductId") or _gk_os.get("sellerProductId", ""),
-                                    "계정": _gk_acct["account_name"],
-                                })
-                    except Exception:
-                        continue
+            if _gk_status == "INSTRUCT" and not _instruct_all.empty:
+                # 상단에서 이미 조회한 INSTRUCT 데이터 재사용
+                for _, _row in _instruct_all.iterrows():
+                    _gk_api_rows.append({
+                        "옵션명": _row.get("옵션명", ""),
+                        "상품명": _row.get("상품명", ""),
+                        "수량": int(_row.get("수량", 0)),
+                        "결제금액": int(_row.get("결제금액", 0)),
+                        "_seller_product_id": _row.get("_seller_product_id", ""),
+                        "계정": _row.get("계정", ""),
+                    })
+            else:
+                with st.spinner(f"{_gk_status} 주문 조회 중..."):
+                    for _, _gk_acct in accounts_df.iterrows():
+                        _gk_client = create_wing_client(_gk_acct)
+                        if not _gk_client:
+                            continue
+                        try:
+                            _gk_result = _gk_client.get_all_ordersheets(_gk_from_str, _gk_to_str, status=_gk_status)
+                            for _gk_os in _gk_result:
+                                _gk_items = _gk_os.get("orderItems", [])
+                                if not _gk_items:
+                                    _gk_items = [_gk_os]
+                                for _gk_item in _gk_items:
+                                    _gk_api_rows.append({
+                                        "옵션명": _gk_item.get("vendorItemName", ""),
+                                        "상품명": _gk_item.get("sellerProductName") or _gk_os.get("sellerProductName", ""),
+                                        "수량": int(_gk_item.get("shippingCount", 0) or 0),
+                                        "결제금액": int(_gk_item.get("orderPrice", 0) or 0),
+                                        "_seller_product_id": _gk_item.get("sellerProductId") or _gk_os.get("sellerProductId", ""),
+                                        "계정": _gk_acct["account_name"],
+                                    })
+                        except Exception:
+                            continue
 
             # API 결과 → DataFrame + DB에서 ISBN/도서명/출판사 매칭
             _gk_orders = pd.DataFrame(_gk_api_rows) if _gk_api_rows else pd.DataFrame()

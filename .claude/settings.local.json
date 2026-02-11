@@ -158,7 +158,13 @@
       "Bash(tailscale status:*)",
       "Bash(git pull:*)",
       "Bash(tailscale logout:*)",
-      "Bash(tailscale login:*)"
+      "Bash(tailscale login:*)",
+      "Bash(cmd //c:*)",
+      "Bash(git --no-pager diff app/models/)",
+      "Bash(git --no-pager log --oneline -5)",
+      "Bash(git --no-pager diff app/pages/orders.py)",
+      "Bash(git --no-pager diff scripts/sync_revenue.py)",
+      "Bash(git --no-pager diff .claude/settings.local.json)"
     ]
   },
   "hooks": {
