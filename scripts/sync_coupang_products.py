@@ -33,7 +33,10 @@ os.chdir(project_root)
 from dotenv import load_dotenv
 load_dotenv()
 
-from app.database import SessionLocal, init_db
+from psycopg2.extras import execute_values
+from sqlalchemy import text
+
+from app.database import SessionLocal, init_db, engine
 from app.models.account import Account
 from app.models.listing import Listing
 from app.api.coupang_wing_client import CoupangWingClient, CoupangWingError
@@ -192,6 +195,74 @@ def _safe_commit(db):
     db.commit()
 
 
+def _bulk_upsert_listings(rows):
+    """벌크 UPSERT (execute_values + ON CONFLICT DO UPDATE)"""
+    if not rows:
+        return
+    raw_conn = engine.raw_connection()
+    try:
+        cur = raw_conn.cursor()
+        sql = """
+            INSERT INTO listings (account_id, coupang_product_id, vendor_item_id, isbn,
+                coupang_status, sale_price, original_price, product_name,
+                synced_at, created_at, updated_at)
+            VALUES %s
+            ON CONFLICT (account_id, coupang_product_id) DO UPDATE SET
+                coupang_status = EXCLUDED.coupang_status,
+                product_name = EXCLUDED.product_name,
+                vendor_item_id = COALESCE(EXCLUDED.vendor_item_id, listings.vendor_item_id),
+                sale_price = CASE WHEN EXCLUDED.sale_price > 0 THEN EXCLUDED.sale_price ELSE listings.sale_price END,
+                original_price = CASE WHEN EXCLUDED.original_price > 0 THEN EXCLUDED.original_price ELSE listings.original_price END,
+                isbn = COALESCE(listings.isbn, EXCLUDED.isbn),
+                synced_at = EXCLUDED.synced_at,
+                updated_at = NOW()
+        """
+        BATCH = 500
+        for i in range(0, len(rows), BATCH):
+            batch = rows[i:i + BATCH]
+            execute_values(cur, sql, batch, page_size=BATCH)
+        raw_conn.commit()
+        cur.close()
+    except Exception as e:
+        raw_conn.rollback()
+        logger.error(f"벌크 UPSERT 실패: {e}")
+        raise
+    finally:
+        raw_conn.close()
+
+
+def _bulk_update_listings_by_id(rows):
+    """ISBN fallback 매칭된 listings 벌크 UPDATE (id 기반)"""
+    if not rows:
+        return
+    raw_conn = engine.raw_connection()
+    try:
+        cur = raw_conn.cursor()
+        sql = """
+            UPDATE listings SET
+                coupang_product_id = v.cpid::bigint,
+                coupang_status = v.status,
+                product_name = v.pname,
+                vendor_item_id = COALESCE(v.vid::bigint, listings.vendor_item_id),
+                sale_price = CASE WHEN v.sprice::int > 0 THEN v.sprice::int ELSE listings.sale_price END,
+                original_price = CASE WHEN v.oprice::int > 0 THEN v.oprice::int ELSE listings.original_price END,
+                isbn = COALESCE(listings.isbn, v.isbn),
+                synced_at = v.synced::timestamp,
+                updated_at = NOW()
+            FROM (VALUES %s) AS v(lid, cpid, status, pname, vid, sprice, oprice, isbn, synced)
+            WHERE listings.id = v.lid::int
+        """
+        execute_values(cur, sql, rows, page_size=500)
+        raw_conn.commit()
+        cur.close()
+    except Exception as e:
+        raw_conn.rollback()
+        logger.error(f"벌크 UPDATE 실패: {e}")
+        raise
+    finally:
+        raw_conn.close()
+
+
 def _fetch_product_detail(client: CoupangWingClient, seller_product_id: int) -> dict:
     """상품 상세 조회 (1회 재시도 포함)"""
     try:
@@ -261,23 +332,26 @@ def sync_account_products(
         logger.info(f"  [DRY-RUN] ISBN 추출: {result['isbn_found']}개 성공, {result['isbn_missing']}개 실패")
         return result
 
-    # 기존 listings를 한번에 로드 → dict로 룩업 (BigInteger 키)
-    existing_listings = db.query(Listing).filter(
-        Listing.account_id == account.id
-    ).all()
+    # 기존 listings를 경량 dict로 로드 (ORM 객체 아닌 필수 컬럼만)
+    existing_rows = db.execute(text(
+        "SELECT id, coupang_product_id, isbn, vendor_item_id "
+        "FROM listings WHERE account_id = :aid"
+    ), {"aid": account.id}).fetchall()
 
-    by_product_id = {}  # coupang_product_id(int) → Listing
-    by_isbn = {}        # isbn → Listing
-    for lst in existing_listings:
-        if lst.coupang_product_id:
-            by_product_id[int(lst.coupang_product_id)] = lst
-        if lst.isbn:
-            by_isbn[lst.isbn] = lst
+    by_pid = {}   # coupang_product_id(int) → dict
+    by_isbn = {}  # isbn → dict
+    for row in existing_rows:
+        d = {"id": row[0], "coupang_product_id": row[1], "isbn": row[2], "vendor_item_id": row[3]}
+        if d["coupang_product_id"]:
+            by_pid[int(d["coupang_product_id"])] = d
+        if d["isbn"]:
+            by_isbn[d["isbn"]] = d
 
-    logger.info(f"  기존 DB listings: {len(existing_listings)}개 (product_id:{len(by_product_id)}, isbn:{len(by_isbn)})")
+    logger.info(f"  기존 DB listings: {len(existing_rows)}개 (product_id:{len(by_pid)}, isbn:{len(by_isbn)})")
 
     now = datetime.utcnow()
-    new_listings = []
+    upsert_by_pid = {}    # pid → tuple (중복 시 마지막 값 유지)
+    isbn_update_rows = [] # ISBN fallback 매칭 → UPDATE by id
 
     for product_data in products:
         seller_product_id = int(product_data.get("sellerProductId", 0))
@@ -293,9 +367,11 @@ def sync_account_products(
             result["isbn_missing"] += 1
 
         # dict 룩업 (DB 쿼리 없음)
-        existing = by_product_id.get(seller_product_id)
+        existing = by_pid.get(seller_product_id)
+        isbn_fallback = False
         if not existing and isbn_str:
             existing = by_isbn.get(isbn_str)
+            isbn_fallback = bool(existing)
 
         # 가격 추출
         items = product_data.get("items", [])
@@ -305,50 +381,43 @@ def sync_account_products(
             sale_price = items[0].get("salePrice", 0) or 0
             original_price = items[0].get("originalPrice", 0) or 0
 
-        if existing:
-            existing.coupang_product_id = seller_product_id
-            existing.coupang_status = coupang_status
-            existing.product_name = product_name
-            if vendor_item_id:
-                existing.vendor_item_id = vendor_item_id
-            if sale_price:
-                existing.sale_price = sale_price
-            if original_price:
-                existing.original_price = original_price
-            if isbn_str and not existing.isbn:
-                existing.isbn = isbn_str
-            existing.synced_at = now
+        if existing and isbn_fallback:
+            # ISBN fallback: 기존 행의 coupang_product_id가 다름 → id 기반 UPDATE
+            isbn_update_rows.append((
+                existing["id"], seller_product_id, coupang_status, product_name,
+                vendor_item_id, sale_price, original_price, isbn_str, now,
+            ))
             result["updated"] += 1
-            # 새로 등록된 product_id도 룩업에 반영
-            if seller_product_id:
-                by_product_id[seller_product_id] = existing
+            by_pid[seller_product_id] = {**existing, "coupang_product_id": seller_product_id}
         else:
-            listing = Listing(
-                account_id=account.id,
-                coupang_product_id=seller_product_id,
-                vendor_item_id=vendor_item_id,
-                isbn=isbn_str,
-                coupang_status=coupang_status,
-                sale_price=sale_price,
-                original_price=original_price,
-                product_name=product_name,
-                synced_at=now,
+            # 신규 + 기존(pid 매칭) 모두 UPSERT로 처리
+            if existing:
+                result["updated"] += 1
+            else:
+                result["new"] += 1
+                d = {"id": None, "coupang_product_id": seller_product_id,
+                     "isbn": isbn_str, "vendor_item_id": vendor_item_id}
+                by_pid[seller_product_id] = d
+                if isbn_str:
+                    by_isbn[isbn_str] = d
+
+            upsert_by_pid[seller_product_id] = (
+                account.id, seller_product_id, vendor_item_id, isbn_str,
+                coupang_status, sale_price, original_price, product_name,
+                now, now, now,  # synced_at, created_at, updated_at
             )
-            new_listings.append(listing)
-            result["new"] += 1
-            # 룩업에 추가 (같은 배치 내 중복 방지)
-            if seller_product_id:
-                by_product_id[seller_product_id] = listing
-            if isbn_str:
-                by_isbn[isbn_str] = listing
 
-    # 신규 listings 일괄 추가
-    if new_listings:
-        db.add_all(new_listings)
+    # 벌크 UPSERT (INSERT + ON CONFLICT DO UPDATE)
+    upsert_rows = list(upsert_by_pid.values())
+    t0 = time.time()
+    _bulk_upsert_listings(upsert_rows)
 
-    _safe_commit(db)
+    # ISBN fallback 매칭 벌크 UPDATE
+    _bulk_update_listings_by_id(isbn_update_rows)
 
-    logger.info(f"  [Stage 1] 완료: 신규 {result['new']}개, 업데이트 {result['updated']}개")
+    elapsed = time.time() - t0
+    logger.info(f"  [Stage 1] 벌크 완료 ({elapsed:.1f}초): upsert {len(upsert_rows)}건, isbn-update {len(isbn_update_rows)}건")
+    logger.info(f"  [Stage 1] 신규 {result['new']}개, 업데이트 {result['updated']}개")
     logger.info(f"  ISBN 추출: 성공 {result['isbn_found']}개, 실패 {result['isbn_missing']}개")
 
     # ── Stage 2: 상품 상세 조회 ──
@@ -356,11 +425,18 @@ def sync_account_products(
         logger.info(f"  [Stage 2] --quick 모드: 상세 조회 생략")
         return result
 
+    # Stage 2용 ORM 객체 재로드 (벌크 커밋 이후)
+    db.expire_all()
+    stage2_listings = db.query(Listing).filter(
+        Listing.account_id == account.id
+    ).all()
+    by_product_id = {int(l.coupang_product_id): l
+                     for l in stage2_listings if l.coupang_product_id}
+
     # 상세 조회 대상 선별
     stale_cutoff = now - timedelta(hours=stale_hours)
     detail_targets = []
 
-    # by_product_id에서 모든 listing 수집 (신규 포함)
     all_listings = {pid: lst for pid, lst in by_product_id.items() if pid}
 
     for pid, lst in all_listings.items():
