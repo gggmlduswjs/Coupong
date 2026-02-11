@@ -113,14 +113,21 @@ class RevenueSync:
 
     def _match_listing(self, conn, account_id: int, product_id, vendor_item_id, product_name: str = None) -> Optional[int]:
         """product_id, vendor_item_id, product_name으로 listings 매칭"""
-        # 1차: coupang_product_id 매칭
+        # 1차: vendor_item_id 매칭 (가장 정확)
+        if vendor_item_id:
+            row = conn.execute(text(
+                "SELECT id FROM listings WHERE account_id = :aid AND vendor_item_id = :vid LIMIT 1"
+            ), {"aid": account_id, "vid": str(vendor_item_id)}).fetchone()
+            if row:
+                return row[0]
+        # 2차: coupang_product_id 매칭
         if product_id:
             row = conn.execute(text(
                 "SELECT id FROM listings WHERE account_id = :aid AND coupang_product_id = :pid LIMIT 1"
             ), {"aid": account_id, "pid": str(product_id)}).fetchone()
             if row:
                 return row[0]
-        # 2차: product_name 정확 매칭
+        # 3차: product_name 정확 매칭
         if product_name:
             row = conn.execute(text(
                 "SELECT id FROM listings WHERE account_id = :aid AND product_name = :name LIMIT 1"

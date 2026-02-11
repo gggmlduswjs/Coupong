@@ -46,8 +46,9 @@ def render(selected_account, accounts_df, account_names):
 
         rows = []
         _today = date.today()
+        # ACCEPT/INSTRUCT는 미처리 주문이므로 최근 7일 조회
         _ranges = [
-            (_today.isoformat(), _today.isoformat()),
+            ((_today - timedelta(days=7)).isoformat(), _today.isoformat()),
         ]
 
         for _, acct in accounts_df.iterrows():
@@ -852,44 +853,95 @@ def render(selected_account, accounts_df, account_names):
     # 탭4: 출고/극동
     # ══════════════════════════════════════
     with _ord_tab4:
-            st.caption("출고 완료 주문 → 극동 프로그램용 엑셀 다운로드")
+            st.caption("WING API 실시간 출고 주문 → 극동 프로그램용 엑셀 다운로드")
 
             _gk_col1, _gk_col2, _gk_col3 = st.columns([2, 2, 1])
             with _gk_col1:
-                _gk_date_from = st.date_input("시작일", value=date.today(), key="tab4_gk_date_from")
+                _gk_date_from = st.date_input("시작일", value=date.today() - timedelta(days=1), key="tab4_gk_date_from")
             with _gk_col2:
                 _gk_date_to = st.date_input("종료일", value=date.today(), key="tab4_gk_date_to")
             with _gk_col3:
                 _gk_status = st.selectbox("상태", ["DEPARTURE", "DELIVERING", "FINAL_DELIVERY"], key="tab4_gk_status")
 
-            # DB에서 출고 주문 조회 (날짜 범위)
+            # WING API 실시간 조회
             _gk_from_str = _gk_date_from.isoformat()
             _gk_to_str = _gk_date_to.isoformat()
-            _gk_orders = query_df(f"""
-                SELECT
-                    o.vendor_item_name as 옵션명,
-                    o.seller_product_name as 상품명,
-                    o.shipping_count as 수량,
-                    o.order_price as 결제금액,
-                    COALESCE(l.isbn, b.isbn) as "ISBN",
-                    COALESCE(b.title, b2.title) as "DB도서명",
-                    l.product_name as 리스팅도서명,
-                    COALESCE(b.list_price, b2.list_price) as 정가,
-                    COALESCE(b.author, b2.author) as 저자,
-                    COALESCE(b.year, b2.year) as 출판년도,
-                    COALESCE(pub.name, pub2.name) as 출판사,
-                    COALESCE(pub.supply_rate, pub2.supply_rate) as 공급률
-                FROM orders o
-                LEFT JOIN listings l ON o.listing_id = l.id
-                LEFT JOIN products p ON l.product_id = p.id
-                LEFT JOIN books b ON p.book_id = b.id
-                LEFT JOIN publishers pub ON b.publisher_id = pub.id
-                LEFT JOIN books b2 ON l.isbn = b2.isbn AND l.isbn IS NOT NULL AND l.isbn != ''
-                LEFT JOIN publishers pub2 ON b2.publisher_id = pub2.id
-                WHERE o.status = '{_gk_status}'
-                AND DATE(o.ordered_at) BETWEEN '{_gk_from_str}' AND '{_gk_to_str}'
-                ORDER BY COALESCE(pub.name, pub2.name), o.vendor_item_name
-            """)
+
+            _gk_api_rows = []
+            with st.spinner(f"{_gk_status} 주문 조회 중..."):
+                for _, _gk_acct in accounts_df.iterrows():
+                    _gk_client = create_wing_client(_gk_acct)
+                    if not _gk_client:
+                        continue
+                    try:
+                        _gk_result = _gk_client.get_all_ordersheets(_gk_from_str, _gk_to_str, status=_gk_status)
+                        for _gk_os in _gk_result:
+                            _gk_items = _gk_os.get("orderItems", [])
+                            if not _gk_items:
+                                _gk_items = [_gk_os]
+                            for _gk_item in _gk_items:
+                                _gk_api_rows.append({
+                                    "옵션명": _gk_item.get("vendorItemName", ""),
+                                    "상품명": _gk_item.get("sellerProductName") or _gk_os.get("sellerProductName", ""),
+                                    "수량": int(_gk_item.get("shippingCount", 0) or 0),
+                                    "결제금액": int(_gk_item.get("orderPrice", 0) or 0),
+                                    "_seller_product_id": _gk_item.get("sellerProductId") or _gk_os.get("sellerProductId", ""),
+                                    "계정": _gk_acct["account_name"],
+                                })
+                    except Exception:
+                        continue
+
+            # API 결과 → DataFrame + DB에서 ISBN/도서명/출판사 매칭
+            _gk_orders = pd.DataFrame(_gk_api_rows) if _gk_api_rows else pd.DataFrame()
+
+            if not _gk_orders.empty:
+                # sellerProductId → listings → books 매칭
+                _gk_isbn_lookup = query_df("""
+                    SELECT l.coupang_product_id,
+                           COALESCE(l.isbn, b.isbn) as "ISBN",
+                           COALESCE(b.title, b2.title) as "DB도서명",
+                           l.product_name as 리스팅도서명,
+                           COALESCE(b.list_price, b2.list_price) as 정가,
+                           COALESCE(b.author, b2.author) as 저자,
+                           COALESCE(b.year, b2.year) as 출판년도,
+                           COALESCE(pub.name, pub2.name) as 출판사,
+                           COALESCE(pub.supply_rate, pub2.supply_rate) as 공급률
+                    FROM listings l
+                    LEFT JOIN products p ON l.product_id = p.id
+                    LEFT JOIN books b ON p.book_id = b.id
+                    LEFT JOIN publishers pub ON b.publisher_id = pub.id
+                    LEFT JOIN books b2 ON l.isbn = b2.isbn AND l.isbn IS NOT NULL AND l.isbn != ''
+                    LEFT JOIN publishers pub2 ON b2.publisher_id = pub2.id
+                    WHERE l.coupang_product_id IS NOT NULL AND l.coupang_product_id != ''
+                """)
+                _gk_map = {}
+                if not _gk_isbn_lookup.empty:
+                    for _, _r in _gk_isbn_lookup.iterrows():
+                        _gk_map[str(_r["coupang_product_id"])] = {
+                            "ISBN": str(_r["ISBN"]) if pd.notna(_r["ISBN"]) else "",
+                            "DB도서명": str(_r["DB도서명"]) if pd.notna(_r["DB도서명"]) else "",
+                            "리스팅도서명": str(_r["리스팅도서명"]) if pd.notna(_r["리스팅도서명"]) else "",
+                            "정가": _r["정가"] if pd.notna(_r["정가"]) else 0,
+                            "저자": str(_r["저자"]) if pd.notna(_r["저자"]) else "",
+                            "출판년도": _r["출판년도"] if pd.notna(_r["출판년도"]) else None,
+                            "출판사": str(_r["출판사"]) if pd.notna(_r["출판사"]) else "",
+                            "공급률": _r["공급률"] if pd.notna(_r["공급률"]) else None,
+                        }
+
+                def _gk_enrich(row):
+                    info = _gk_map.get(str(row.get("_seller_product_id", "")), {})
+                    return pd.Series({
+                        "ISBN": info.get("ISBN", ""),
+                        "DB도서명": info.get("DB도서명", ""),
+                        "리스팅도서명": info.get("리스팅도서명", ""),
+                        "정가": info.get("정가", 0),
+                        "저자": info.get("저자", ""),
+                        "출판년도": info.get("출판년도", None),
+                        "출판사": info.get("출판사", ""),
+                        "공급률": info.get("공급률", None),
+                    })
+                _gk_extra = _gk_orders.apply(_gk_enrich, axis=1)
+                _gk_orders = pd.concat([_gk_orders, _gk_extra], axis=1)
 
             if _gk_orders.empty:
                 st.info(f"{_gk_from_str} ~ {_gk_to_str} 에 {_gk_status} 주문이 없습니다. 주문 동기화가 필요할 수 있습니다.")

@@ -153,7 +153,12 @@
       "Bash(\"C:/Program Files/Tailscale/tailscale.exe\" serve status)",
       "Bash(\"C:/Program Files/Tailscale/tailscale.exe\" serve:*)",
       "Bash(\"C:/Program Files/Tailscale/tailscale.exe\" serve --bg --https=443 http://localhost:8503)",
-      "WebFetch(domain:desktop-iolofr8.tail1bf879.ts.net)"
+      "WebFetch(domain:desktop-iolofr8.tail1bf879.ts.net)",
+      "Bash(git clean:*)",
+      "Bash(tailscale status:*)",
+      "Bash(git pull:*)",
+      "Bash(tailscale logout:*)",
+      "Bash(tailscale login:*)"
     ]
   },
   "hooks": {
