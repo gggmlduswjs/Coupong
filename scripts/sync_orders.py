@@ -24,7 +24,7 @@ from sqlalchemy import text
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
-from app.database import get_engine_for_db, _is_postgresql
+from app.database import get_engine_for_db
 
 from dotenv import load_dotenv
 load_dotenv(ROOT / ".env")
@@ -32,7 +32,7 @@ load_dotenv(ROOT / ".env")
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from app.api.coupang_wing_client import CoupangWingClient, CoupangWingError
-from app.services.wing_sync_base import get_accounts, create_wing_client
+from app.services.wing_sync_base import get_accounts, create_wing_client, match_listing
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -43,46 +43,6 @@ ORDER_STATUSES = ["ACCEPT", "INSTRUCT", "DEPARTURE", "DELIVERING", "FINAL_DELIVE
 
 class OrderSync:
     """발주서(주문) 동기화 엔진"""
-
-    CREATE_TABLE_SQL = """
-    CREATE TABLE IF NOT EXISTS orders (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        account_id INTEGER NOT NULL REFERENCES accounts(id),
-        shipment_box_id BIGINT NOT NULL,
-        order_id BIGINT NOT NULL,
-        vendor_item_id BIGINT,
-        status VARCHAR(30),
-        ordered_at DATETIME,
-        paid_at DATETIME,
-        orderer_name VARCHAR(100),
-        receiver_name VARCHAR(100),
-        receiver_addr VARCHAR(500),
-        receiver_post_code VARCHAR(10),
-        product_id INTEGER,
-        seller_product_id INTEGER,
-        seller_product_name VARCHAR(500),
-        vendor_item_name VARCHAR(500),
-        shipping_count INTEGER DEFAULT 0,
-        cancel_count INTEGER DEFAULT 0,
-        hold_count_for_cancel INTEGER DEFAULT 0,
-        sales_price INTEGER DEFAULT 0,
-        order_price INTEGER DEFAULT 0,
-        discount_price INTEGER DEFAULT 0,
-        shipping_price INTEGER DEFAULT 0,
-        delivery_company_name VARCHAR(50),
-        invoice_number VARCHAR(50),
-        shipment_type VARCHAR(20),
-        delivered_date DATETIME,
-        confirm_date DATETIME,
-        refer VARCHAR(50),
-        canceled BOOLEAN DEFAULT 0,
-        listing_id INTEGER REFERENCES listings(id),
-        raw_json TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(account_id, shipment_box_id, vendor_item_id)
-    )
-    """
 
     CREATE_INDEXES_SQL = [
         "CREATE INDEX IF NOT EXISTS ix_order_account_date ON orders(account_id, ordered_at)",
@@ -95,22 +55,23 @@ class OrderSync:
         self._ensure_table()
 
     def _ensure_table(self):
-        """테이블이 없으면 생성"""
-        if _is_postgresql(str(self.engine.url)):
-            # PG는 ORM이 이미 테이블 생성함 — 인덱스만 확인
-            with self.engine.connect() as conn:
-                for idx_sql in self.CREATE_INDEXES_SQL:
-                    try:
-                        conn.execute(text(idx_sql))
-                    except Exception:
-                        pass
-                conn.commit()
-        else:
-            with self.engine.connect() as conn:
-                conn.execute(text(self.CREATE_TABLE_SQL))
-                for idx_sql in self.CREATE_INDEXES_SQL:
+        """인덱스 확인 + vendor_item_id NULL 마이그레이션"""
+        with self.engine.connect() as conn:
+            for idx_sql in self.CREATE_INDEXES_SQL:
+                try:
                     conn.execute(text(idx_sql))
-                conn.commit()
+                except Exception:
+                    pass
+            # vendor_item_id NULL → 0 마이그레이션 (UNIQUE 키 NULL 방지)
+            try:
+                fixed = conn.execute(text(
+                    "UPDATE orders SET vendor_item_id = 0 WHERE vendor_item_id IS NULL"
+                )).rowcount
+                if fixed:
+                    logger.info(f"vendor_item_id NULL → 0 마이그레이션: {fixed}건")
+            except Exception:
+                pass
+            conn.commit()
         logger.info("orders 테이블 확인 완료")
 
     def _get_accounts(self, account_name: str = None) -> list:
@@ -139,24 +100,6 @@ class OrderSync:
             return int(price_val.get("units", 0) or 0)
         return int(price_val or 0)
 
-    def _match_listing(self, conn, account_id: int, seller_product_id, product_name: str = None) -> Optional[int]:
-        """seller_product_id 또는 product_name으로 listings 매칭"""
-        # 1차: coupang_product_id 매칭
-        if seller_product_id:
-            row = conn.execute(text(
-                "SELECT id FROM listings WHERE account_id = :aid AND coupang_product_id = :pid LIMIT 1"
-            ), {"aid": account_id, "pid": str(seller_product_id)}).fetchone()
-            if row:
-                return row[0]
-        # 2차: product_name 매칭
-        if product_name:
-            row = conn.execute(text(
-                "SELECT id FROM listings WHERE account_id = :aid AND product_name = :name LIMIT 1"
-            ), {"aid": account_id, "name": product_name}).fetchone()
-            if row:
-                return row[0]
-        return None
-
     def _extract_order_items(self, ordersheet: dict) -> List[dict]:
         """
         발주서 응답에서 주문 아이템 추출
@@ -170,6 +113,43 @@ class OrderSync:
             # orderItems가 없으면 ordersheet 자체를 아이템으로 처리
             return [ordersheet]
         return items
+
+    UPSERT_SQL = """
+        INSERT INTO orders
+            (account_id, shipment_box_id, order_id, vendor_item_id,
+             status, ordered_at, paid_at,
+             orderer_name, receiver_name, receiver_addr, receiver_post_code,
+             product_id, seller_product_id, seller_product_name, vendor_item_name,
+             shipping_count, cancel_count, hold_count_for_cancel,
+             sales_price, order_price, discount_price, shipping_price,
+             delivery_company_name, invoice_number, shipment_type,
+             delivered_date, confirm_date,
+             refer, canceled, listing_id, raw_json, updated_at)
+        VALUES
+            (:account_id, :shipment_box_id, :order_id, :vendor_item_id,
+             :status, :ordered_at, :paid_at,
+             :orderer_name, :receiver_name, :receiver_addr, :receiver_post_code,
+             :product_id, :seller_product_id, :seller_product_name, :vendor_item_name,
+             :shipping_count, :cancel_count, :hold_count_for_cancel,
+             :sales_price, :order_price, :discount_price, :shipping_price,
+             :delivery_company_name, :invoice_number, :shipment_type,
+             :delivered_date, :confirm_date,
+             :refer, :canceled, :listing_id, :raw_json, :updated_at)
+        ON CONFLICT (account_id, shipment_box_id, vendor_item_id) DO UPDATE SET
+            status=EXCLUDED.status, ordered_at=EXCLUDED.ordered_at, paid_at=EXCLUDED.paid_at,
+            orderer_name=EXCLUDED.orderer_name, receiver_name=EXCLUDED.receiver_name,
+            receiver_addr=EXCLUDED.receiver_addr, receiver_post_code=EXCLUDED.receiver_post_code,
+            product_id=EXCLUDED.product_id, seller_product_id=EXCLUDED.seller_product_id,
+            seller_product_name=EXCLUDED.seller_product_name, vendor_item_name=EXCLUDED.vendor_item_name,
+            shipping_count=EXCLUDED.shipping_count, cancel_count=EXCLUDED.cancel_count,
+            hold_count_for_cancel=EXCLUDED.hold_count_for_cancel,
+            sales_price=EXCLUDED.sales_price, order_price=EXCLUDED.order_price,
+            discount_price=EXCLUDED.discount_price, shipping_price=EXCLUDED.shipping_price,
+            delivery_company_name=EXCLUDED.delivery_company_name, invoice_number=EXCLUDED.invoice_number,
+            shipment_type=EXCLUDED.shipment_type, delivered_date=EXCLUDED.delivered_date,
+            confirm_date=EXCLUDED.confirm_date, refer=EXCLUDED.refer, canceled=EXCLUDED.canceled,
+            listing_id=EXCLUDED.listing_id, raw_json=EXCLUDED.raw_json, updated_at=EXCLUDED.updated_at
+    """
 
     def sync_account(self, account: dict, date_from: date, date_to: date,
                      statuses: List[str] = None,
@@ -220,7 +200,7 @@ class OrderSync:
                         total_fetched += 1
                         v_item_id = item.get("vendorItemId") or os_data.get("vendorItemId")
 
-                        # listing 매칭
+                        # listing 매칭 (3-level)
                         sp_id = item.get("sellerProductId") or os_data.get("sellerProductId")
                         sp_name = item.get("sellerProductName") or os_data.get("sellerProductName", "")
 
@@ -235,7 +215,7 @@ class OrderSync:
                             "account_id": account_id,
                             "shipment_box_id": int(shipment_box_id),
                             "order_id": int(order_id),
-                            "vendor_item_id": int(v_item_id) if v_item_id else None,
+                            "vendor_item_id": int(v_item_id) if v_item_id else 0,  # NULL → 0
                             "status": status,
                             "ordered_at": self._parse_datetime(os_data.get("orderedAt")),
                             "paid_at": self._parse_datetime(os_data.get("paidAt")),
@@ -266,50 +246,26 @@ class OrderSync:
                             "updated_at": datetime.utcnow().isoformat(),
                         }
 
-                        # 건별 커밋 + 재시도 (DB 잠금 방지)
-                        for attempt in range(3):
-                            try:
-                                with self.engine.connect() as conn:
-                                    # listing 매칭
-                                    listing_id = self._match_listing(conn, account_id, sp_id, sp_name)
-                                    if listing_id:
-                                        params["listing_id"] = listing_id
-                                        total_matched += 1
+                        try:
+                            with self.engine.connect() as conn:
+                                # 3-level listing 매칭
+                                listing_id = match_listing(
+                                    conn, account_id,
+                                    vendor_item_id=v_item_id,
+                                    coupang_product_id=sp_id,
+                                    product_name=sp_name
+                                )
+                                if listing_id:
+                                    params["listing_id"] = listing_id
+                                    total_matched += 1
 
-                                    conn.execute(text("""
-                                        INSERT OR REPLACE INTO orders
-                                        (account_id, shipment_box_id, order_id, vendor_item_id,
-                                         status, ordered_at, paid_at,
-                                         orderer_name, receiver_name, receiver_addr, receiver_post_code,
-                                         product_id, seller_product_id, seller_product_name, vendor_item_name,
-                                         shipping_count, cancel_count, hold_count_for_cancel,
-                                         sales_price, order_price, discount_price, shipping_price,
-                                         delivery_company_name, invoice_number, shipment_type,
-                                         delivered_date, confirm_date,
-                                         refer, canceled, listing_id, raw_json, updated_at)
-                                        VALUES
-                                        (:account_id, :shipment_box_id, :order_id, :vendor_item_id,
-                                         :status, :ordered_at, :paid_at,
-                                         :orderer_name, :receiver_name, :receiver_addr, :receiver_post_code,
-                                         :product_id, :seller_product_id, :seller_product_name, :vendor_item_name,
-                                         :shipping_count, :cancel_count, :hold_count_for_cancel,
-                                         :sales_price, :order_price, :discount_price, :shipping_price,
-                                         :delivery_company_name, :invoice_number, :shipment_type,
-                                         :delivered_date, :confirm_date,
-                                         :refer, :canceled, :listing_id, :raw_json, :updated_at)
-                                    """), params)
-                                    conn.commit()
-                                total_upserted += 1
-                                break
-                            except SQLAlchemyError as e:
-                                if attempt < 2 and "database is locked" in str(e):
-                                    import time
-                                    time.sleep(1 + attempt)
-                                    continue
-                                logger.warning(f"  DB 오류: {e}")
-                            except (ValueError, TypeError) as e:
-                                logger.warning(f"  데이터 변환 오류: {e}")
-                                break
+                                conn.execute(text(self.UPSERT_SQL), params)
+                                conn.commit()
+                            total_upserted += 1
+                        except SQLAlchemyError as e:
+                            logger.warning(f"  DB 오류: {e}")
+                        except (ValueError, TypeError) as e:
+                            logger.warning(f"  데이터 변환 오류: {e}")
 
             if progress_callback:
                 progress_callback(wi + 1, len(windows),

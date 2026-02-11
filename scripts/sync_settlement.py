@@ -23,13 +23,12 @@ from sqlalchemy import text
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
-from app.database import get_engine_for_db, _is_postgresql
+from app.database import get_engine_for_db
 
 from dotenv import load_dotenv
 load_dotenv(ROOT / ".env")
 
 from app.api.coupang_wing_client import CoupangWingClient, CoupangWingError
-from app.constants import WING_ACCOUNT_ENV_MAP
 from app.services.wing_sync_base import get_accounts, create_wing_client
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -39,57 +38,63 @@ logger = logging.getLogger(__name__)
 class SettlementSync:
     """정산 내역 동기화 엔진"""
 
-    CREATE_TABLE_SQL = """
-    CREATE TABLE IF NOT EXISTS settlement_history (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        account_id INTEGER NOT NULL REFERENCES accounts(id),
-        year_month VARCHAR(7) NOT NULL,
-        settlement_type VARCHAR(20),
-        settlement_date VARCHAR(10),
-        settlement_status VARCHAR(20),
-        revenue_date_from VARCHAR(10),
-        revenue_date_to VARCHAR(10),
-        total_sale INTEGER DEFAULT 0,
-        service_fee INTEGER DEFAULT 0,
-        settlement_target_amount INTEGER DEFAULT 0,
-        settlement_amount INTEGER DEFAULT 0,
-        last_amount INTEGER DEFAULT 0,
-        pending_released_amount INTEGER DEFAULT 0,
-        seller_discount_coupon INTEGER DEFAULT 0,
-        downloadable_coupon INTEGER DEFAULT 0,
-        seller_service_fee INTEGER DEFAULT 0,
-        courantee_fee INTEGER DEFAULT 0,
-        deduction_amount INTEGER DEFAULT 0,
-        debt_of_last_week INTEGER DEFAULT 0,
-        final_amount INTEGER DEFAULT 0,
-        bank_name VARCHAR(50),
-        bank_account VARCHAR(50),
-        raw_json TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(account_id, year_month, settlement_type, settlement_date)
-    )
-    """
-
     CREATE_INDEXES_SQL = [
         "CREATE INDEX IF NOT EXISTS ix_settle_account_month ON settlement_history(account_id, year_month)",
         "CREATE INDEX IF NOT EXISTS ix_settle_month ON settlement_history(year_month)",
     ]
+
+    UPSERT_SQL = """
+        INSERT INTO settlement_history
+            (account_id, year_month, settlement_type, settlement_date,
+             settlement_status, revenue_date_from, revenue_date_to,
+             total_sale, service_fee, settlement_target_amount,
+             settlement_amount, last_amount, pending_released_amount,
+             seller_discount_coupon, downloadable_coupon,
+             seller_service_fee, courantee_fee, deduction_amount,
+             debt_of_last_week, final_amount,
+             bank_name, bank_account, raw_json)
+        VALUES
+            (:account_id, :year_month, :settlement_type, :settlement_date,
+             :settlement_status, :revenue_date_from, :revenue_date_to,
+             :total_sale, :service_fee, :settlement_target_amount,
+             :settlement_amount, :last_amount, :pending_released_amount,
+             :seller_discount_coupon, :downloadable_coupon,
+             :seller_service_fee, :courantee_fee, :deduction_amount,
+             :debt_of_last_week, :final_amount,
+             :bank_name, :bank_account, :raw_json)
+        ON CONFLICT (account_id, year_month, settlement_type, settlement_date) DO UPDATE SET
+            settlement_status=EXCLUDED.settlement_status,
+            revenue_date_from=EXCLUDED.revenue_date_from, revenue_date_to=EXCLUDED.revenue_date_to,
+            total_sale=EXCLUDED.total_sale, service_fee=EXCLUDED.service_fee,
+            settlement_target_amount=EXCLUDED.settlement_target_amount,
+            settlement_amount=EXCLUDED.settlement_amount, last_amount=EXCLUDED.last_amount,
+            pending_released_amount=EXCLUDED.pending_released_amount,
+            seller_discount_coupon=EXCLUDED.seller_discount_coupon,
+            downloadable_coupon=EXCLUDED.downloadable_coupon,
+            seller_service_fee=EXCLUDED.seller_service_fee, courantee_fee=EXCLUDED.courantee_fee,
+            deduction_amount=EXCLUDED.deduction_amount, debt_of_last_week=EXCLUDED.debt_of_last_week,
+            final_amount=EXCLUDED.final_amount,
+            bank_name=EXCLUDED.bank_name, bank_account=EXCLUDED.bank_account,
+            raw_json=EXCLUDED.raw_json
+    """
 
     def __init__(self, db_path: str = None):
         self.engine = get_engine_for_db(db_path)
         self._ensure_table()
 
     def _ensure_table(self):
-        """테이블이 없으면 생성"""
+        """인덱스 확인"""
         with self.engine.connect() as conn:
-            conn.execute(text(self.CREATE_TABLE_SQL))
             for idx_sql in self.CREATE_INDEXES_SQL:
-                conn.execute(text(idx_sql))
+                try:
+                    conn.execute(text(idx_sql))
+                except Exception:
+                    pass
             conn.commit()
         logger.info("settlement_history 테이블 확인 완료")
 
     def _get_accounts(self, account_name: str = None) -> list:
-        """WING API 활성화된 계정 목록 조회 (SQL 인젝션 방지)"""
+        """WING API 활성화된 계정 목록 조회"""
         return get_accounts(self.engine, account_name)
 
     def _create_client(self, account: dict) -> CoupangWingClient:
@@ -158,26 +163,7 @@ class SettlementSync:
                     s_date = item.get("settlementDate", "")
 
                     try:
-                        conn.execute(text("""
-                            INSERT OR REPLACE INTO settlement_history
-                            (account_id, year_month, settlement_type, settlement_date,
-                             settlement_status, revenue_date_from, revenue_date_to,
-                             total_sale, service_fee, settlement_target_amount,
-                             settlement_amount, last_amount, pending_released_amount,
-                             seller_discount_coupon, downloadable_coupon,
-                             seller_service_fee, courantee_fee, deduction_amount,
-                             debt_of_last_week, final_amount,
-                             bank_name, bank_account, raw_json)
-                            VALUES
-                            (:account_id, :year_month, :settlement_type, :settlement_date,
-                             :settlement_status, :revenue_date_from, :revenue_date_to,
-                             :total_sale, :service_fee, :settlement_target_amount,
-                             :settlement_amount, :last_amount, :pending_released_amount,
-                             :seller_discount_coupon, :downloadable_coupon,
-                             :seller_service_fee, :courantee_fee, :deduction_amount,
-                             :debt_of_last_week, :final_amount,
-                             :bank_name, :bank_account, :raw_json)
-                        """), {
+                        conn.execute(text(self.UPSERT_SQL), {
                             "account_id": account_id,
                             "year_month": ym,
                             "settlement_type": s_type,

@@ -158,3 +158,42 @@ class WingSyncBase:
     def close(self):
         """엔진 닫기"""
         self.engine.dispose()
+
+
+def match_listing(conn, account_id: int, vendor_item_id=None,
+                  coupang_product_id=None, product_name: str = None) -> Optional[int]:
+    """
+    3-level listing 매칭: vendor_item_id → coupang_product_id → product_name
+
+    Args:
+        conn: SQLAlchemy connection
+        account_id: 계정 ID
+        vendor_item_id: WING vendor item ID (가장 정확)
+        coupang_product_id: 쿠팡 상품 ID (seller_product_id)
+        product_name: 상품명 (최후 수단)
+
+    Returns:
+        listings.id 또는 None
+    """
+    # 1차: vendor_item_id 매칭 (가장 정확)
+    if vendor_item_id:
+        row = conn.execute(text(
+            "SELECT id FROM listings WHERE account_id = :aid AND vendor_item_id = :vid LIMIT 1"
+        ), {"aid": account_id, "vid": str(vendor_item_id)}).fetchone()
+        if row:
+            return row[0]
+    # 2차: coupang_product_id 매칭
+    if coupang_product_id:
+        row = conn.execute(text(
+            "SELECT id FROM listings WHERE account_id = :aid AND coupang_product_id = :pid LIMIT 1"
+        ), {"aid": account_id, "pid": str(coupang_product_id)}).fetchone()
+        if row:
+            return row[0]
+    # 3차: product_name 정확 매칭
+    if product_name:
+        row = conn.execute(text(
+            "SELECT id FROM listings WHERE account_id = :aid AND product_name = :name LIMIT 1"
+        ), {"aid": account_id, "name": product_name}).fetchone()
+        if row:
+            return row[0]
+    return None

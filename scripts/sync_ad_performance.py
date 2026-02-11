@@ -642,113 +642,112 @@ class AdPerformanceSync:
         return rows
 
     def save_to_db(self, account_id: int, rows: List[dict]) -> int:
-        """UPSERT로 DB 저장 — 배치 처리 (PostgreSQL 원격 DB 최적화)"""
+        """UPSERT — PostgreSQL: execute_values 벌크, SQLite: executemany"""
         if not rows:
             return 0
 
         from app.database import _is_postgresql
         is_pg = _is_postgresql(str(self.engine.url))
 
-        _cols = """(account_id, ad_date, campaign_id, campaign_name, ad_group_name,
-                         coupang_product_id, product_name, listing_id,
-                         keyword, match_type,
-                         impressions, clicks, ctr, avg_cpc, ad_spend,
-                         direct_orders, direct_revenue, indirect_orders, indirect_revenue,
-                         total_orders, total_revenue, roas,
-                         total_quantity, direct_quantity, indirect_quantity,
-                         bid_type, sales_method, ad_type, option_id,
-                         ad_name, placement, creative_id, category,
-                         report_type)"""
-        _vals = """(:account_id, :ad_date, :campaign_id, :campaign_name, :ad_group_name,
-                         :coupang_product_id, :product_name, :listing_id,
-                         :keyword, :match_type,
-                         :impressions, :clicks, :ctr, :avg_cpc, :ad_spend,
-                         :direct_orders, :direct_revenue, :indirect_orders, :indirect_revenue,
-                         :total_orders, :total_revenue, :roas,
-                         :total_quantity, :direct_quantity, :indirect_quantity,
-                         :bid_type, :sales_method, :ad_type, :option_id,
-                         :ad_name, :placement, :creative_id, :category,
-                         :report_type)"""
+        col_names = [
+            "account_id", "ad_date", "campaign_id", "campaign_name", "ad_group_name",
+            "coupang_product_id", "product_name", "listing_id",
+            "keyword", "match_type",
+            "impressions", "clicks", "ctr", "avg_cpc", "ad_spend",
+            "direct_orders", "direct_revenue", "indirect_orders", "indirect_revenue",
+            "total_orders", "total_revenue", "roas",
+            "total_quantity", "direct_quantity", "indirect_quantity",
+            "bid_type", "sales_method", "ad_type", "option_id",
+            "ad_name", "placement", "creative_id", "category",
+            "report_type",
+        ]
+
+        def _to_tuple(row):
+            return (
+                account_id, row["ad_date"].isoformat(), row["campaign_id"],
+                row["campaign_name"], row["ad_group_name"],
+                row["coupang_product_id"], row["product_name"], row.get("listing_id"),
+                row["keyword"], row["match_type"],
+                row["impressions"], row["clicks"], row["ctr"], row["avg_cpc"], row["ad_spend"],
+                row["direct_orders"], row["direct_revenue"], row["indirect_orders"], row["indirect_revenue"],
+                row["total_orders"], row["total_revenue"], row["roas"],
+                row["total_quantity"], row["direct_quantity"], row["indirect_quantity"],
+                row["bid_type"], row["sales_method"], row["ad_type"], row["option_id"],
+                row["ad_name"], row["placement"], row["creative_id"], row["category"],
+                row["report_type"],
+            )
+
+        # 중복 키 제거 (마지막 값 유지)
+        unique_key = lambda r: (
+            account_id, r["ad_date"].isoformat(), r["campaign_id"],
+            r["ad_group_name"], r["coupang_product_id"], r["keyword"], r["report_type"],
+        )
+        deduped = {}
+        for r in rows:
+            deduped[unique_key(r)] = r
+        rows = list(deduped.values())
+        logger.info(f"중복 제거 후: {len(rows):,}건")
+
+        tuples = [_to_tuple(r) for r in rows]
 
         if is_pg:
-            _update_cols = ", ".join(
-                f"{c} = EXCLUDED.{c}" for c in [
-                    "campaign_name", "ad_group_name", "product_name", "listing_id",
-                    "match_type", "impressions", "clicks", "ctr", "avg_cpc", "ad_spend",
-                    "direct_orders", "direct_revenue", "indirect_orders", "indirect_revenue",
-                    "total_orders", "total_revenue", "roas",
-                    "total_quantity", "direct_quantity", "indirect_quantity",
-                    "bid_type", "sales_method", "ad_type", "option_id",
-                    "ad_name", "placement", "creative_id", "category",
-                ]
-            )
-            sql = f"""INSERT INTO ad_performances {_cols} VALUES {_vals}
+            # psycopg2 execute_values — 1회 SQL로 수천 건 벌크 INSERT
+            update_cols = [
+                "campaign_name", "ad_group_name", "product_name", "listing_id",
+                "match_type", "impressions", "clicks", "ctr", "avg_cpc", "ad_spend",
+                "direct_orders", "direct_revenue", "indirect_orders", "indirect_revenue",
+                "total_orders", "total_revenue", "roas",
+                "total_quantity", "direct_quantity", "indirect_quantity",
+                "bid_type", "sales_method", "ad_type", "option_id",
+                "ad_name", "placement", "creative_id", "category",
+            ]
+            _update_set = ", ".join(f"{c} = EXCLUDED.{c}" for c in update_cols)
+            _cols_str = ", ".join(col_names)
+            _placeholders = ", ".join(["%s"] * len(col_names))
+
+            sql = f"""INSERT INTO ad_performances ({_cols_str}) VALUES %s
                 ON CONFLICT (account_id, ad_date, campaign_id, ad_group_name,
                              coupang_product_id, keyword, report_type)
-                DO UPDATE SET {_update_cols}"""
-        else:
-            sql = f"INSERT OR REPLACE INTO ad_performances {_cols} VALUES {_vals}"
+                DO UPDATE SET {_update_set}"""
 
-        def _make_params(row):
-            return {
-                "account_id": account_id,
-                "ad_date": row["ad_date"].isoformat(),
-                "campaign_id": row["campaign_id"],
-                "campaign_name": row["campaign_name"],
-                "ad_group_name": row["ad_group_name"],
-                "coupang_product_id": row["coupang_product_id"],
-                "product_name": row["product_name"],
-                "listing_id": row.get("listing_id"),
-                "keyword": row["keyword"],
-                "match_type": row["match_type"],
-                "impressions": row["impressions"],
-                "clicks": row["clicks"],
-                "ctr": row["ctr"],
-                "avg_cpc": row["avg_cpc"],
-                "ad_spend": row["ad_spend"],
-                "direct_orders": row["direct_orders"],
-                "direct_revenue": row["direct_revenue"],
-                "indirect_orders": row["indirect_orders"],
-                "indirect_revenue": row["indirect_revenue"],
-                "total_orders": row["total_orders"],
-                "total_revenue": row["total_revenue"],
-                "roas": row["roas"],
-                "total_quantity": row["total_quantity"],
-                "direct_quantity": row["direct_quantity"],
-                "indirect_quantity": row["indirect_quantity"],
-                "bid_type": row["bid_type"],
-                "sales_method": row["sales_method"],
-                "ad_type": row["ad_type"],
-                "option_id": row["option_id"],
-                "ad_name": row["ad_name"],
-                "placement": row["placement"],
-                "creative_id": row["creative_id"],
-                "category": row["category"],
-                "report_type": row["report_type"],
-            }
-
-        BATCH_SIZE = 500
-        upserted = 0
-        with self.engine.connect() as conn:
-            for i in range(0, len(rows), BATCH_SIZE):
-                batch = rows[i:i + BATCH_SIZE]
-                params_list = [_make_params(r) for r in batch]
-                try:
-                    conn.execute(text(sql), params_list)
+            from psycopg2.extras import execute_values
+            raw_conn = self.engine.raw_connection()
+            try:
+                cur = raw_conn.cursor()
+                BATCH = 2000
+                upserted = 0
+                for i in range(0, len(tuples), BATCH):
+                    batch = tuples[i:i + BATCH]
+                    execute_values(cur, sql, batch, page_size=BATCH)
                     upserted += len(batch)
-                except Exception as e:
-                    # 배치 실패 시 개별 INSERT로 폴백
-                    logger.warning(f"배치 INSERT 실패 (batch {i//BATCH_SIZE}), 개별 처리: {e}")
-                    for params in params_list:
-                        try:
-                            conn.execute(text(sql), params)
-                            upserted += 1
-                        except Exception as e2:
-                            logger.debug(f"INSERT 스킵: {e2}")
-                if (i + BATCH_SIZE) % 5000 == 0 or i + BATCH_SIZE >= len(rows):
-                    logger.info(f"진행: {min(i + BATCH_SIZE, len(rows)):,}/{len(rows):,}건")
+                    logger.info(f"벌크 진행: {min(i + BATCH, len(tuples)):,}/{len(tuples):,}건")
+                raw_conn.commit()
+                cur.close()
+            except Exception as e:
+                raw_conn.rollback()
+                logger.error(f"벌크 INSERT 실패: {e}")
+                raise
+            finally:
+                raw_conn.close()
+        else:
+            # SQLite: executemany
+            _cols_str = ", ".join(col_names)
+            _placeholders = ", ".join(["?"] * len(col_names))
+            sql = f"INSERT OR REPLACE INTO ad_performances ({_cols_str}) VALUES ({_placeholders})"
 
-            conn.commit()
+            raw_conn = self.engine.raw_connection()
+            try:
+                cur = raw_conn.cursor()
+                cur.executemany(sql, tuples)
+                upserted = len(tuples)
+                raw_conn.commit()
+                cur.close()
+            except Exception as e:
+                raw_conn.rollback()
+                logger.error(f"SQLite INSERT 실패: {e}")
+                raise
+            finally:
+                raw_conn.close()
 
         logger.info(f"저장 완료: {upserted}/{len(rows)}건")
         return upserted

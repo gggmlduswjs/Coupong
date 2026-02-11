@@ -24,7 +24,7 @@ from sqlalchemy import text
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
-from app.database import get_engine_for_db, _is_postgresql
+from app.database import get_engine_for_db
 
 from dotenv import load_dotenv
 load_dotenv(ROOT / ".env")
@@ -32,7 +32,7 @@ load_dotenv(ROOT / ".env")
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from app.api.coupang_wing_client import CoupangWingClient, CoupangWingError
-from app.services.wing_sync_base import get_accounts, create_wing_client
+from app.services.wing_sync_base import get_accounts, create_wing_client, match_listing
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -45,63 +45,73 @@ RETURN_STATUSES = ["RU", "UC", "CC", "PR"]
 class ReturnSync:
     """반품/취소 동기화 엔진"""
 
-    CREATE_TABLE_SQL = """
-    CREATE TABLE IF NOT EXISTS return_requests (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        account_id INTEGER NOT NULL REFERENCES accounts(id),
-        receipt_id BIGINT NOT NULL,
-        order_id BIGINT,
-        payment_id BIGINT,
-        receipt_type VARCHAR(10),
-        receipt_status VARCHAR(40),
-        created_at_api DATETIME,
-        modified_at_api DATETIME,
-        requester_name VARCHAR(100),
-        requester_phone VARCHAR(50),
-        requester_address VARCHAR(500),
-        requester_address_detail VARCHAR(200),
-        requester_zip_code VARCHAR(10),
-        cancel_reason_category1 VARCHAR(100),
-        cancel_reason_category2 VARCHAR(100),
-        cancel_reason TEXT,
-        cancel_count_sum INTEGER,
-        return_delivery_id BIGINT,
-        return_delivery_type VARCHAR(20),
-        release_stop_status VARCHAR(30),
-        fault_by_type VARCHAR(20),
-        pre_refund BOOLEAN,
-        complete_confirm_type VARCHAR(30),
-        complete_confirm_date DATETIME,
-        reason_code VARCHAR(50),
-        reason_code_text VARCHAR(200),
-        return_shipping_charge INTEGER,
-        enclose_price INTEGER,
-        return_items_json TEXT,
-        return_delivery_json TEXT,
-        raw_json TEXT,
-        listing_id INTEGER REFERENCES listings(id),
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(account_id, receipt_id)
-    )
-    """
-
     CREATE_INDEXES_SQL = [
         "CREATE INDEX IF NOT EXISTS ix_return_account_created ON return_requests(account_id, created_at_api)",
         "CREATE INDEX IF NOT EXISTS ix_return_account_status ON return_requests(account_id, receipt_status)",
         "CREATE INDEX IF NOT EXISTS ix_return_order_id ON return_requests(order_id)",
     ]
 
+    UPSERT_SQL = """
+        INSERT INTO return_requests
+            (account_id, receipt_id, order_id, payment_id,
+             receipt_type, receipt_status,
+             created_at_api, modified_at_api,
+             requester_name, requester_phone, requester_address,
+             requester_address_detail, requester_zip_code,
+             cancel_reason_category1, cancel_reason_category2, cancel_reason,
+             cancel_count_sum,
+             return_delivery_id, return_delivery_type, release_stop_status,
+             fault_by_type, pre_refund,
+             complete_confirm_type, complete_confirm_date,
+             reason_code, reason_code_text,
+             return_shipping_charge, enclose_price,
+             return_items_json, return_delivery_json, raw_json,
+             listing_id, updated_at)
+        VALUES
+            (:account_id, :receipt_id, :order_id, :payment_id,
+             :receipt_type, :receipt_status,
+             :created_at_api, :modified_at_api,
+             :requester_name, :requester_phone, :requester_address,
+             :requester_address_detail, :requester_zip_code,
+             :cancel_reason_category1, :cancel_reason_category2, :cancel_reason,
+             :cancel_count_sum,
+             :return_delivery_id, :return_delivery_type, :release_stop_status,
+             :fault_by_type, :pre_refund,
+             :complete_confirm_type, :complete_confirm_date,
+             :reason_code, :reason_code_text,
+             :return_shipping_charge, :enclose_price,
+             :return_items_json, :return_delivery_json, :raw_json,
+             :listing_id, :updated_at)
+        ON CONFLICT (account_id, receipt_id) DO UPDATE SET
+            receipt_type=EXCLUDED.receipt_type, receipt_status=EXCLUDED.receipt_status,
+            created_at_api=EXCLUDED.created_at_api, modified_at_api=EXCLUDED.modified_at_api,
+            requester_name=EXCLUDED.requester_name, requester_phone=EXCLUDED.requester_phone,
+            requester_address=EXCLUDED.requester_address, requester_address_detail=EXCLUDED.requester_address_detail,
+            requester_zip_code=EXCLUDED.requester_zip_code,
+            cancel_reason_category1=EXCLUDED.cancel_reason_category1, cancel_reason_category2=EXCLUDED.cancel_reason_category2,
+            cancel_reason=EXCLUDED.cancel_reason, cancel_count_sum=EXCLUDED.cancel_count_sum,
+            return_delivery_id=EXCLUDED.return_delivery_id, return_delivery_type=EXCLUDED.return_delivery_type,
+            release_stop_status=EXCLUDED.release_stop_status, fault_by_type=EXCLUDED.fault_by_type,
+            pre_refund=EXCLUDED.pre_refund, complete_confirm_type=EXCLUDED.complete_confirm_type,
+            complete_confirm_date=EXCLUDED.complete_confirm_date,
+            reason_code=EXCLUDED.reason_code, reason_code_text=EXCLUDED.reason_code_text,
+            return_shipping_charge=EXCLUDED.return_shipping_charge, enclose_price=EXCLUDED.enclose_price,
+            return_items_json=EXCLUDED.return_items_json, return_delivery_json=EXCLUDED.return_delivery_json,
+            raw_json=EXCLUDED.raw_json, listing_id=EXCLUDED.listing_id, updated_at=EXCLUDED.updated_at
+    """
+
     def __init__(self, db_path: str = None):
         self.engine = get_engine_for_db(db_path)
         self._ensure_table()
 
     def _ensure_table(self):
-        """테이블이 없으면 생성"""
+        """인덱스 확인"""
         with self.engine.connect() as conn:
-            conn.execute(text(self.CREATE_TABLE_SQL))
             for idx_sql in self.CREATE_INDEXES_SQL:
-                conn.execute(text(idx_sql))
+                try:
+                    conn.execute(text(idx_sql))
+                except Exception:
+                    pass
             conn.commit()
         logger.info("return_requests 테이블 확인 완료")
 
@@ -120,22 +130,6 @@ class ReturnSync:
         if isinstance(dt_str, datetime):
             return dt_str.isoformat()
         return str(dt_str)[:19]
-
-    def _match_listing(self, conn, account_id: int, seller_product_id, product_name: str = None) -> Optional[int]:
-        """seller_product_id 또는 product_name으로 listings 매칭"""
-        if seller_product_id:
-            row = conn.execute(text(
-                "SELECT id FROM listings WHERE account_id = :aid AND coupang_product_id = :pid LIMIT 1"
-            ), {"aid": account_id, "pid": str(seller_product_id)}).fetchone()
-            if row:
-                return row[0]
-        if product_name:
-            row = conn.execute(text(
-                "SELECT id FROM listings WHERE account_id = :aid AND product_name = :name LIMIT 1"
-            ), {"aid": account_id, "name": product_name}).fetchone()
-            if row:
-                return row[0]
-        return None
 
     def _extract_shipping_charge(self, data: dict) -> Optional[int]:
         """반품배송비 추출 (returnShippingCharge.units)"""
@@ -217,10 +211,12 @@ class ReturnSync:
                 # returnItems에서 상품 정보 추출
                 return_items = ret_data.get("returnItems", [])
                 seller_product_id = None
+                vendor_item_id = None
                 product_name = None
                 if return_items:
                     first_item = return_items[0]
                     seller_product_id = first_item.get("sellerProductId")
+                    vendor_item_id = first_item.get("vendorItemId")
                     product_name = first_item.get("sellerProductName", "")
 
                 # 수량 합산
@@ -265,60 +261,26 @@ class ReturnSync:
                     "updated_at": datetime.utcnow().isoformat(),
                 }
 
-                # 건별 커밋 + 재시도 (DB 잠금 방지)
-                for attempt in range(3):
-                    try:
-                        with self.engine.connect() as conn:
-                            # listing 매칭
-                            listing_id = self._match_listing(conn, account_id, seller_product_id, product_name)
-                            if listing_id:
-                                params["listing_id"] = listing_id
-                                total_matched += 1
+                try:
+                    with self.engine.connect() as conn:
+                        # 3-level listing 매칭
+                        listing_id = match_listing(
+                            conn, account_id,
+                            vendor_item_id=vendor_item_id,
+                            coupang_product_id=seller_product_id,
+                            product_name=product_name
+                        )
+                        if listing_id:
+                            params["listing_id"] = listing_id
+                            total_matched += 1
 
-                            conn.execute(text("""
-                                INSERT OR REPLACE INTO return_requests
-                                (account_id, receipt_id, order_id, payment_id,
-                                 receipt_type, receipt_status,
-                                 created_at_api, modified_at_api,
-                                 requester_name, requester_phone, requester_address,
-                                 requester_address_detail, requester_zip_code,
-                                 cancel_reason_category1, cancel_reason_category2, cancel_reason,
-                                 cancel_count_sum,
-                                 return_delivery_id, return_delivery_type, release_stop_status,
-                                 fault_by_type, pre_refund,
-                                 complete_confirm_type, complete_confirm_date,
-                                 reason_code, reason_code_text,
-                                 return_shipping_charge, enclose_price,
-                                 return_items_json, return_delivery_json, raw_json,
-                                 listing_id, updated_at)
-                                VALUES
-                                (:account_id, :receipt_id, :order_id, :payment_id,
-                                 :receipt_type, :receipt_status,
-                                 :created_at_api, :modified_at_api,
-                                 :requester_name, :requester_phone, :requester_address,
-                                 :requester_address_detail, :requester_zip_code,
-                                 :cancel_reason_category1, :cancel_reason_category2, :cancel_reason,
-                                 :cancel_count_sum,
-                                 :return_delivery_id, :return_delivery_type, :release_stop_status,
-                                 :fault_by_type, :pre_refund,
-                                 :complete_confirm_type, :complete_confirm_date,
-                                 :reason_code, :reason_code_text,
-                                 :return_shipping_charge, :enclose_price,
-                                 :return_items_json, :return_delivery_json, :raw_json,
-                                 :listing_id, :updated_at)
-                            """), params)
-                            conn.commit()
-                        total_upserted += 1
-                        break
-                    except SQLAlchemyError as e:
-                        if attempt < 2 and "database is locked" in str(e):
-                            import time
-                            time.sleep(1 + attempt)
-                            continue
-                        logger.warning(f"  DB 오류: {e}")
-                    except (ValueError, TypeError) as e:
-                        logger.warning(f"  데이터 변환 오류: {e}")
-                        break
+                        conn.execute(text(self.UPSERT_SQL), params)
+                        conn.commit()
+                    total_upserted += 1
+                except SQLAlchemyError as e:
+                    logger.warning(f"  DB 오류: {e}")
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"  데이터 변환 오류: {e}")
 
             if progress_callback:
                 progress_callback(wi + 1, len(windows),

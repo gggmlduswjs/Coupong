@@ -84,7 +84,9 @@ class RevenueSync:
         self._ensure_table()
 
     def _ensure_table(self):
-        """테이블이 없으면 생성"""
+        """테이블이 없으면 생성 (PostgreSQL은 ORM 모델로 이미 존재하므로 스킵)"""
+        if "postgresql" in str(self.engine.url):
+            return
         with self.engine.connect() as conn:
             conn.execute(text(self.CREATE_TABLE_SQL))
             for idx_sql in self.CREATE_INDEXES_SQL:
@@ -205,8 +207,8 @@ class RevenueSync:
                             continue
 
                         try:
-                            conn.execute(text("""
-                                INSERT OR IGNORE INTO revenue_history
+                            insert_sql = """
+                                INSERT INTO revenue_history
                                 (account_id, order_id, sale_type, sale_date, recognition_date,
                                  settlement_date, product_id, product_name, vendor_item_id,
                                  vendor_item_name, sale_price, quantity, coupang_discount,
@@ -220,7 +222,9 @@ class RevenueSync:
                                  :sale_amount, :seller_discount, :service_fee, :service_fee_vat,
                                  :service_fee_ratio, :settlement_amount, :delivery_fee_amount,
                                  :delivery_fee_settlement, :listing_id)
-                            """), {
+                                ON CONFLICT (account_id, order_id, vendor_item_id) DO NOTHING
+                            """
+                            conn.execute(text(insert_sql), {
                                 "account_id": account_id,
                                 "order_id": int(order_id),
                                 "sale_type": item.get("saleType", "SALE"),
