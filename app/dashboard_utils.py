@@ -33,16 +33,10 @@ def run_sql(sql: str, params: dict = None):
         conn.commit()
 
 
-# ─── 환경 감지 ───
-
-IS_CLOUD = os.path.exists("/mount/src")  # Streamlit Cloud 환경
-
 # ─── WING API ───
 
 def create_wing_client(account_row):
-    """계정 정보로 WING API 클라이언트 생성 (Cloud 환경에서는 None 반환)"""
-    if IS_CLOUD:
-        return None
+    """계정 정보로 WING API 클라이언트 생성"""
     account_name = account_row["account_name"]
     env_prefix = WING_ACCOUNT_ENV_MAP.get(account_name, "")
     vendor_id = account_row.get("vendor_id") or ""
