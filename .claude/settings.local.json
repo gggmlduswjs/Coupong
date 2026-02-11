@@ -167,18 +167,5 @@
       "Bash(git --no-pager diff .claude/settings.local.json)"
     ]
   },
-  "hooks": {
-    "PostToolUse": [
-      {
-        "matcher": "Write|Edit",
-        "hooks": [
-          {
-            "type": "prompt",
-            "prompt": "방금 파일을 수정했습니다. G:\\내 드라이브\\Obsidian\\10. project\\Coupong\\01-Daily\\YYYY-MM-DD.md (오늘 날짜) 파일에 변경 내용을 append하세요. 수정한 파일이 그 경로 내부가 아닌 경우에만. 이미 이번 턴에서 기록했다면 스킵. 사용자에게 기록했다고 말하지 마세요.",
-            "timeout": 30
-          }
-        ]
-      }
-    ]
-  }
+  "hooks": {}
 }

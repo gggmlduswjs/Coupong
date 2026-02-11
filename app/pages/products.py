@@ -10,7 +10,7 @@ from pathlib import Path
 
 from app.dashboard_utils import (
     query_df, run_sql, create_wing_client, fmt_krw, fmt_money_df,
-    product_to_upload_data, engine, _is_pg, render_grid,
+    product_to_upload_data, engine, render_grid,
     CoupangWingError,
 )
 from app.api.coupang_wing_client import CoupangWingClient
@@ -27,7 +27,6 @@ from config.publishers import get_publisher_info
 from app.database import SessionLocal
 
 ROOT = Path(__file__).parent.parent
-DB_PATH = ROOT / "coupang_auto.db"
 
 
 def render(selected_account, accounts_df, account_names):
@@ -45,16 +44,6 @@ def render(selected_account, accounts_df, account_names):
             COUNT(*) FILTER (WHERE coupang_status = 'active' AND stock_quantity <= 3) as low_stock_cnt,
             COUNT(*) FILTER (WHERE coupang_status = 'active' AND winner_status = 'winner') as winner_cnt,
             COUNT(*) FILTER (WHERE coupang_status = 'active' AND winner_status = 'not_winner') as not_winner_cnt
-        FROM listings
-    """) if _is_pg else query_df("""
-        SELECT
-            SUM(CASE WHEN coupang_status = 'active' THEN 1 ELSE 0 END) as active_cnt,
-            SUM(CASE WHEN coupang_status != 'active' THEN 1 ELSE 0 END) as other_cnt,
-            COALESCE(SUM(CASE WHEN coupang_status = 'active' THEN sale_price ELSE 0 END), 0) as total_sale,
-            SUM(CASE WHEN coupang_status = 'active' AND coupang_sale_price > 0 AND sale_price > 0 AND sale_price != coupang_sale_price THEN 1 ELSE 0 END) as price_diff_cnt,
-            SUM(CASE WHEN coupang_status = 'active' AND stock_quantity <= 3 THEN 1 ELSE 0 END) as low_stock_cnt,
-            SUM(CASE WHEN coupang_status = 'active' AND winner_status = 'winner' THEN 1 ELSE 0 END) as winner_cnt,
-            SUM(CASE WHEN coupang_status = 'active' AND winner_status = 'not_winner' THEN 1 ELSE 0 END) as not_winner_cnt
         FROM listings
     """)
     _pub_cnt = int(query_df("SELECT COUNT(*) as c FROM publishers WHERE is_active = true").iloc[0]['c'])

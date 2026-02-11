@@ -4,7 +4,6 @@ from app.services.job_queue import JobQueue, UploadJob
 from app.services.uploader_service import UploaderService
 from app.services.wing_sync_base import WingSyncBase, get_accounts, create_wing_client
 from app.services.transaction_manager import atomic_operation, BatchProcessor
-from app.services.db_migration import SQLiteMigrator
 
 __all__ = [
     'AccountManager',
@@ -16,5 +15,4 @@ __all__ = [
     'create_wing_client',
     'atomic_operation',
     'BatchProcessor',
-    'SQLiteMigrator',
 ]

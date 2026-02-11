@@ -35,8 +35,6 @@ from app.constants import WING_ACCOUNT_ENV_MAP, CRAWL_MIN_PRICE, CRAWL_EXCLUDE_K
 from crawlers.aladin_api_crawler import AladinAPICrawler
 from app.api.coupang_wing_client import CoupangWingClient
 from uploaders.coupang_api_uploader import CoupangAPIUploader
-from app.services.db_migration import SQLiteMigrator
-
 logging.basicConfig(
     level=logging.INFO,
     format='[%(asctime)s] %(levelname)s %(message)s',
@@ -52,9 +50,6 @@ class FranchiseSync:
         self.db = db or SessionLocal()
         self._owns_db = db is None
         self.ttb_key = os.getenv("ALADIN_TTB_KEY", "")
-        # DB 마이그레이션: sales_point 컬럼 추가
-        migrator = SQLiteMigrator(engine)
-        migrator.add_columns_if_missing("books", {"sales_point": "INTEGER DEFAULT 0"})
 
     def close(self):
         if self._owns_db:

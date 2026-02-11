@@ -20,13 +20,11 @@ from app.dashboard_utils import (
     fmt_money_df,
     render_grid,
     engine,
-    _is_pg,
 )
 
 logger = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parent.parent.parent
-DB_PATH = ROOT / "coupang_auto.db"
 
 
 def render(selected_account, accounts_df, account_names):
@@ -62,42 +60,6 @@ def render(selected_account, accounts_df, account_names):
         prev_from_str = prev_date_from.isoformat()
         prev_to_str = prev_date_to.isoformat()
 
-        # revenue_history 테이블 보장 (SQLite 전용 — Supabase에는 이미 존재)
-        if not _is_pg:
-            with engine.connect() as _conn:
-                _conn.execute(text("""
-                    CREATE TABLE IF NOT EXISTS revenue_history (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        account_id INTEGER NOT NULL REFERENCES accounts(id),
-                        order_id BIGINT NOT NULL,
-                        sale_type VARCHAR(10) NOT NULL,
-                        sale_date DATE NOT NULL,
-                        recognition_date DATE NOT NULL,
-                        settlement_date DATE,
-                        product_id BIGINT,
-                        product_name VARCHAR(500),
-                        vendor_item_id BIGINT,
-                        vendor_item_name VARCHAR(500),
-                        sale_price INTEGER DEFAULT 0,
-                        quantity INTEGER DEFAULT 0,
-                        coupang_discount INTEGER DEFAULT 0,
-                        sale_amount INTEGER DEFAULT 0,
-                        seller_discount INTEGER DEFAULT 0,
-                        service_fee INTEGER DEFAULT 0,
-                        service_fee_vat INTEGER DEFAULT 0,
-                        service_fee_ratio REAL,
-                        settlement_amount INTEGER DEFAULT 0,
-                        delivery_fee_amount INTEGER DEFAULT 0,
-                        delivery_fee_settlement INTEGER DEFAULT 0,
-                        listing_id INTEGER REFERENCES listings(id),
-                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                        UNIQUE(account_id, order_id, vendor_item_id)
-                    )
-                """))
-                _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_rev_account_date ON revenue_history(account_id, recognition_date)"))
-                _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_rev_recognition ON revenue_history(recognition_date)"))
-                _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_rev_listing ON revenue_history(listing_id)"))
-                _conn.commit()
 
         # 동기화 실행
         if btn_sync:
@@ -455,43 +417,6 @@ def render(selected_account, accounts_df, account_names):
     with _an_tab2:
 
         _fmt_krw_s = fmt_krw
-
-        # settlement_history 테이블 보장 (SQLite 전용 — Supabase에는 이미 존재)
-        if not _is_pg:
-            with engine.connect() as _conn:
-                _conn.execute(text("""
-                    CREATE TABLE IF NOT EXISTS settlement_history (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        account_id INTEGER NOT NULL REFERENCES accounts(id),
-                        year_month VARCHAR(7) NOT NULL,
-                        settlement_type VARCHAR(20),
-                        settlement_date VARCHAR(10),
-                        settlement_status VARCHAR(20),
-                        revenue_date_from VARCHAR(10),
-                        revenue_date_to VARCHAR(10),
-                        total_sale INTEGER DEFAULT 0,
-                        service_fee INTEGER DEFAULT 0,
-                        settlement_target_amount INTEGER DEFAULT 0,
-                        settlement_amount INTEGER DEFAULT 0,
-                        last_amount INTEGER DEFAULT 0,
-                        pending_released_amount INTEGER DEFAULT 0,
-                        seller_discount_coupon INTEGER DEFAULT 0,
-                        downloadable_coupon INTEGER DEFAULT 0,
-                        seller_service_fee INTEGER DEFAULT 0,
-                        courantee_fee INTEGER DEFAULT 0,
-                        deduction_amount INTEGER DEFAULT 0,
-                        debt_of_last_week INTEGER DEFAULT 0,
-                        final_amount INTEGER DEFAULT 0,
-                        bank_name VARCHAR(50),
-                        bank_account VARCHAR(50),
-                        raw_json TEXT,
-                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                        UNIQUE(account_id, year_month, settlement_type, settlement_date)
-                    )
-                """))
-                _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_settle_account_month ON settlement_history(account_id, year_month)"))
-                _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_settle_month ON settlement_history(year_month)"))
-                _conn.commit()
 
         # ── 상단 컨트롤 ──
         from scripts.sync_settlement import SettlementSync

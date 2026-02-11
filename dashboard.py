@@ -18,18 +18,6 @@ load_dotenv(ROOT / ".env")
 
 logging.basicConfig(level=logging.INFO)
 
-# ─── DB 마이그레이션 (SQLite 전용) ───
-from app.database import engine, _is_postgresql, _database_url
-
-_is_pg = _is_postgresql(_database_url)
-if not _is_pg:
-    from app.services.db_migration import SQLiteMigrator as _Migrator
-    _Migrator(engine).add_columns_if_missing("listings", {
-        "winner_status": "VARCHAR(20)",
-        "winner_checked_at": "DATETIME",
-        "item_id": "VARCHAR(50)",
-    })
-
 # ─── 페이지 설정 ───
 st.set_page_config(page_title="쿠팡 도서 자동화", page_icon="📚", layout="wide")
 

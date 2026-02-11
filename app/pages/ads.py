@@ -17,7 +17,6 @@ from app.dashboard_utils import (
     fmt_krw,
     fmt_money_df,
     engine,
-    _is_pg,
 )
 
 logger = logging.getLogger(__name__)

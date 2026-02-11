@@ -33,8 +33,6 @@ from app.database import SessionLocal, init_db, engine
 from app.models.account import Account
 from app.models.listing import Listing
 from app.api.coupang_wing_client import CoupangWingClient, CoupangWingError
-from app.services.db_migration import SQLiteMigrator
-
 logging.basicConfig(
     level=logging.INFO,
     format='[%(asctime)s] %(levelname)s %(message)s',
@@ -43,29 +41,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def _migrate_winner_columns():
-    """listings 테이블에 위너 관련 컬럼 추가"""
-    migrator = SQLiteMigrator(engine)
-    migrator.add_columns_if_missing("listings", {
-        "winner_status": "VARCHAR(20)",
-        "winner_checked_at": "DATETIME",
-        "item_id": "VARCHAR(50)",
-    })
-
-
-def _safe_commit(db, retries=5, delay=3):
-    """SQLite lock 대비 rollback + 재시도 커밋"""
-    for attempt in range(retries):
-        try:
-            db.commit()
-            return
-        except Exception as e:
-            if "database is locked" in str(e) and attempt < retries - 1:
-                logger.warning(f"  DB 잠금, {delay}초 후 재시도 ({attempt+1}/{retries})")
-                db.rollback()
-                time.sleep(delay)
-            else:
-                raise
+def _safe_commit(db):
+    """DB 커밋"""
+    db.commit()
 
 
 def create_wing_client(account: Account) -> CoupangWingClient:
@@ -219,7 +197,6 @@ def run_sync(account_names=None, dry_run=False, force=False, stale_hours=24):
     print("=" * 60)
 
     init_db()
-    _migrate_winner_columns()
     db = SessionLocal()
 
     try:

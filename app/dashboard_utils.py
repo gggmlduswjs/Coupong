@@ -11,10 +11,7 @@ from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode
 
 from app.api.coupang_wing_client import CoupangWingClient, CoupangWingError
 from app.constants import WING_ACCOUNT_ENV_MAP
-from app.database import engine, _is_postgresql, _database_url
-
-# DB 타입 플래그
-_is_pg = _is_postgresql(_database_url)
+from app.database import engine
 
 
 # ─── 데이터 접근 ───

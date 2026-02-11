@@ -22,7 +22,6 @@ from app.dashboard_utils import (
     fmt_money_df,
     render_grid,
     engine,
-    _is_pg,
 )
 
 

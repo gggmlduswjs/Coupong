@@ -39,7 +39,6 @@ from app.models.account import Account
 from app.models.listing import Listing
 from app.api.coupang_wing_client import CoupangWingClient, CoupangWingError
 from app.constants import WING_ACCOUNT_ENV_MAP
-from app.services.db_migration import SQLiteMigrator
 from obsidian_logger import ObsidianLogger
 
 logging.basicConfig(
@@ -48,40 +47,6 @@ logging.basicConfig(
     datefmt='%H:%M:%S'
 )
 logger = logging.getLogger(__name__)
-
-
-def _migrate_account_columns():
-    """Account 테이블에 WING API 컬럼 추가 (SQLiteMigrator 사용)"""
-    migrator = SQLiteMigrator(engine)
-    migrator.add_columns_if_missing("accounts", {
-        "vendor_id": "VARCHAR(20)",
-        "wing_access_key": "VARCHAR(100)",
-        "wing_secret_key": "VARCHAR(100)",
-        "wing_api_enabled": "BOOLEAN DEFAULT 0",
-        "outbound_shipping_code": "VARCHAR(50)",
-        "return_center_code": "VARCHAR(50)",
-    })
-
-
-def _migrate_listing_detail_columns():
-    """listings 테이블에 상세 동기화 컬럼 추가 (SQLiteMigrator 사용)"""
-    migrator = SQLiteMigrator(engine)
-    migrator.add_columns_if_missing("listings", {
-        "brand": "VARCHAR(200)",
-        "display_category_code": "VARCHAR(20)",
-        "delivery_charge_type": "VARCHAR(20)",
-        "maximum_buy_count": "INTEGER",
-        "supply_price": "INTEGER",
-        "delivery_charge": "INTEGER",
-        "free_ship_over_amount": "INTEGER",
-        "return_charge": "INTEGER",
-        "raw_json": "TEXT",
-        "detail_synced_at": "DATETIME",
-        # 아이템 위너 필드
-        "winner_status": "VARCHAR(20)",
-        "winner_checked_at": "DATETIME",
-        "item_id": "VARCHAR(50)",
-    })
 
 
 def _extract_isbn(product_data: dict) -> str:
@@ -250,19 +215,9 @@ def create_wing_client(account: Account) -> CoupangWingClient:
     )
 
 
-def _safe_commit(db, retries=5, delay=3):
-    """SQLite lock 대비 rollback + 재시도 커밋"""
-    for attempt in range(retries):
-        try:
-            db.commit()
-            return
-        except Exception as e:
-            if "database is locked" in str(e) and attempt < retries - 1:
-                logger.warning(f"  DB 잠금, {delay}초 후 재시도 ({attempt+1}/{retries})")
-                db.rollback()
-                time.sleep(delay)
-            else:
-                raise
+def _safe_commit(db):
+    """DB 커밋"""
+    db.commit()
 
 
 def _fetch_product_detail(client: CoupangWingClient, seller_product_id: str) -> dict:
@@ -627,8 +582,6 @@ def run_sync(account_names=None, max_pages=0, dry_run=False,
     print("=" * 60)
 
     init_db()
-    _migrate_account_columns()
-    _migrate_listing_detail_columns()
     db = SessionLocal()
 
     try:

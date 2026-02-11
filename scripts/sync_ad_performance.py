@@ -209,7 +209,7 @@ class AdPerformanceSync:
 
     CREATE_TABLE_SQL = """
     CREATE TABLE IF NOT EXISTS ad_performances (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         account_id INTEGER NOT NULL REFERENCES accounts(id),
         ad_date DATE NOT NULL,
         campaign_id VARCHAR(50) DEFAULT '',
@@ -276,46 +276,15 @@ class AdPerformanceSync:
         self._ensure_table()
 
     def _ensure_table(self):
-        """테이블이 없으면 생성, 있으면 새 컬럼 마이그레이션"""
-        from app.database import _is_postgresql
-        is_pg = _is_postgresql(str(self.engine.url))
-
+        """테이블이 없으면 생성"""
         with self.engine.connect() as conn:
-            if is_pg:
-                # PostgreSQL: ORM이 이미 테이블 생성, 존재 확인만
-                exists = conn.execute(text(
-                    "SELECT 1 FROM information_schema.tables WHERE table_name = 'ad_performances'"
-                )).fetchone()
-                if not exists:
-                    # PG용 CREATE TABLE (SERIAL 사용)
-                    pg_sql = self.CREATE_TABLE_SQL.replace(
-                        "INTEGER PRIMARY KEY AUTOINCREMENT",
-                        "SERIAL PRIMARY KEY"
-                    )
-                    conn.execute(text(pg_sql))
-                    for idx_sql in self.CREATE_INDEXES_SQL:
-                        conn.execute(text(idx_sql))
-            else:
-                # SQLite: 기존 로직
+            exists = conn.execute(text(
+                "SELECT 1 FROM information_schema.tables WHERE table_name = 'ad_performances'"
+            )).fetchone()
+            if not exists:
                 conn.execute(text(self.CREATE_TABLE_SQL))
                 for idx_sql in self.CREATE_INDEXES_SQL:
                     conn.execute(text(idx_sql))
-
-                # 기존 테이블에 새 컬럼 추가 (없으면 ALTER TABLE)
-                existing = {
-                    row[1]
-                    for row in conn.execute(text("PRAGMA table_info(ad_performances)")).fetchall()
-                }
-                for col_name, col_def in self.MIGRATION_COLUMNS:
-                    if col_name not in existing:
-                        try:
-                            conn.execute(text(
-                                f"ALTER TABLE ad_performances ADD COLUMN {col_name} {col_def}"
-                            ))
-                            logger.info(f"컬럼 추가: {col_name} ({col_def})")
-                        except Exception as e:
-                            logger.debug(f"컬럼 추가 스킵 {col_name}: {e}")
-
             conn.commit()
         logger.info("ad_performances 테이블 확인 완료")
 
@@ -642,12 +611,9 @@ class AdPerformanceSync:
         return rows
 
     def save_to_db(self, account_id: int, rows: List[dict]) -> int:
-        """UPSERT — PostgreSQL: execute_values 벌크, SQLite: executemany"""
+        """UPSERT — PostgreSQL execute_values 벌크 INSERT"""
         if not rows:
             return 0
-
-        from app.database import _is_postgresql
-        is_pg = _is_postgresql(str(self.engine.url))
 
         col_names = [
             "account_id", "ad_date", "campaign_id", "campaign_name", "ad_group_name",
@@ -690,64 +656,43 @@ class AdPerformanceSync:
 
         tuples = [_to_tuple(r) for r in rows]
 
-        if is_pg:
-            # psycopg2 execute_values — 1회 SQL로 수천 건 벌크 INSERT
-            update_cols = [
-                "campaign_name", "ad_group_name", "product_name", "listing_id",
-                "match_type", "impressions", "clicks", "ctr", "avg_cpc", "ad_spend",
-                "direct_orders", "direct_revenue", "indirect_orders", "indirect_revenue",
-                "total_orders", "total_revenue", "roas",
-                "total_quantity", "direct_quantity", "indirect_quantity",
-                "bid_type", "sales_method", "ad_type", "option_id",
-                "ad_name", "placement", "creative_id", "category",
-            ]
-            _update_set = ", ".join(f"{c} = EXCLUDED.{c}" for c in update_cols)
-            _cols_str = ", ".join(col_names)
-            _placeholders = ", ".join(["%s"] * len(col_names))
+        # psycopg2 execute_values — 1회 SQL로 수천 건 벌크 INSERT
+        update_cols = [
+            "campaign_name", "ad_group_name", "product_name", "listing_id",
+            "match_type", "impressions", "clicks", "ctr", "avg_cpc", "ad_spend",
+            "direct_orders", "direct_revenue", "indirect_orders", "indirect_revenue",
+            "total_orders", "total_revenue", "roas",
+            "total_quantity", "direct_quantity", "indirect_quantity",
+            "bid_type", "sales_method", "ad_type", "option_id",
+            "ad_name", "placement", "creative_id", "category",
+        ]
+        _update_set = ", ".join(f"{c} = EXCLUDED.{c}" for c in update_cols)
+        _cols_str = ", ".join(col_names)
 
-            sql = f"""INSERT INTO ad_performances ({_cols_str}) VALUES %s
-                ON CONFLICT (account_id, ad_date, campaign_id, ad_group_name,
-                             coupang_product_id, keyword, report_type)
-                DO UPDATE SET {_update_set}"""
+        sql = f"""INSERT INTO ad_performances ({_cols_str}) VALUES %s
+            ON CONFLICT (account_id, ad_date, campaign_id, ad_group_name,
+                         coupang_product_id, keyword, report_type)
+            DO UPDATE SET {_update_set}"""
 
-            from psycopg2.extras import execute_values
-            raw_conn = self.engine.raw_connection()
-            try:
-                cur = raw_conn.cursor()
-                BATCH = 2000
-                upserted = 0
-                for i in range(0, len(tuples), BATCH):
-                    batch = tuples[i:i + BATCH]
-                    execute_values(cur, sql, batch, page_size=BATCH)
-                    upserted += len(batch)
-                    logger.info(f"벌크 진행: {min(i + BATCH, len(tuples)):,}/{len(tuples):,}건")
-                raw_conn.commit()
-                cur.close()
-            except Exception as e:
-                raw_conn.rollback()
-                logger.error(f"벌크 INSERT 실패: {e}")
-                raise
-            finally:
-                raw_conn.close()
-        else:
-            # SQLite: executemany
-            _cols_str = ", ".join(col_names)
-            _placeholders = ", ".join(["?"] * len(col_names))
-            sql = f"INSERT OR REPLACE INTO ad_performances ({_cols_str}) VALUES ({_placeholders})"
-
-            raw_conn = self.engine.raw_connection()
-            try:
-                cur = raw_conn.cursor()
-                cur.executemany(sql, tuples)
-                upserted = len(tuples)
-                raw_conn.commit()
-                cur.close()
-            except Exception as e:
-                raw_conn.rollback()
-                logger.error(f"SQLite INSERT 실패: {e}")
-                raise
-            finally:
-                raw_conn.close()
+        from psycopg2.extras import execute_values
+        raw_conn = self.engine.raw_connection()
+        try:
+            cur = raw_conn.cursor()
+            BATCH = 2000
+            upserted = 0
+            for i in range(0, len(tuples), BATCH):
+                batch = tuples[i:i + BATCH]
+                execute_values(cur, sql, batch, page_size=BATCH)
+                upserted += len(batch)
+                logger.info(f"벌크 진행: {min(i + BATCH, len(tuples)):,}/{len(tuples):,}건")
+            raw_conn.commit()
+            cur.close()
+        except Exception as e:
+            raw_conn.rollback()
+            logger.error(f"벌크 INSERT 실패: {e}")
+            raise
+        finally:
+            raw_conn.close()
 
         logger.info(f"저장 완료: {upserted}/{len(rows)}건")
         return upserted

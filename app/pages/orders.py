@@ -18,7 +18,6 @@ from app.constants import (
     resolve_distributor,
 )
 from app.dashboard_utils import (
-    _is_pg,
     create_wing_client,
     engine,
     fmt_krw,

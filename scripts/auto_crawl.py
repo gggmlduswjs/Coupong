@@ -48,7 +48,6 @@ CRAWL_HOUR = 3          # 기본 실행 시각 (새벽 3시)
 MAX_PER_PUBLISHER = 50   # 출판사당 최대 검색 수
 YEAR_FILTER = 2025       # 2025년 이후 도서만
 CHECK_INTERVAL = 30      # 시간 체크 간격 (초)
-DB_TIMEOUT = 30          # SQLite timeout (대시보드 동시 접근 대비)
 
 # 안전장치 - CLI에서 재정의 가능
 MAX_ITEMS_SAFETY = 200   # 1회 실행당 최대 처리 아이템 (0=무제한)

@@ -95,7 +95,6 @@ SYNC_CONFIG = {
 # ─────────────────────────────────────────────
 TIMEOUT_CONFIG = {
     "api_request": 30,          # API 요청 타임아웃 (초)
-    "db_busy": 30000,           # SQLite busy 타임아웃 (ms)
     "db_connect": 30,           # DB 연결 타임아웃 (초)
 }
 

@@ -41,7 +41,7 @@ class AdSpendSync:
 
     CREATE_TABLE_SQL = """
     CREATE TABLE IF NOT EXISTS ad_spends (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         account_id INTEGER NOT NULL REFERENCES accounts(id),
         ad_date DATE NOT NULL,
         campaign_id VARCHAR(50) NOT NULL,
@@ -56,7 +56,7 @@ class AdSpendSync:
         billable_cost INTEGER DEFAULT 0,
         vat_amount INTEGER DEFAULT 0,
         total_charge INTEGER DEFAULT 0,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        created_at TIMESTAMP DEFAULT NOW(),
         UNIQUE(account_id, ad_date, campaign_id)
     )
     """
@@ -72,23 +72,11 @@ class AdSpendSync:
 
     def _ensure_table(self):
         """테이블이 없으면 생성"""
-        from app.database import _is_postgresql
-        is_pg = _is_postgresql(str(self.engine.url))
-
         with self.engine.connect() as conn:
-            if is_pg:
-                exists = conn.execute(text(
-                    "SELECT 1 FROM information_schema.tables WHERE table_name = 'ad_spends'"
-                )).fetchone()
-                if not exists:
-                    pg_sql = self.CREATE_TABLE_SQL.replace(
-                        "INTEGER PRIMARY KEY AUTOINCREMENT",
-                        "SERIAL PRIMARY KEY"
-                    )
-                    conn.execute(text(pg_sql))
-                    for idx_sql in self.CREATE_INDEXES_SQL:
-                        conn.execute(text(idx_sql))
-            else:
+            exists = conn.execute(text(
+                "SELECT 1 FROM information_schema.tables WHERE table_name = 'ad_spends'"
+            )).fetchone()
+            if not exists:
                 conn.execute(text(self.CREATE_TABLE_SQL))
                 for idx_sql in self.CREATE_INDEXES_SQL:
                     conn.execute(text(idx_sql))
@@ -204,12 +192,9 @@ class AdSpendSync:
         return account_id, rows
 
     def save_to_db(self, account_id: int, rows: List[dict]) -> int:
-        """UPSERT로 DB 저장 (SQLite: INSERT OR REPLACE, PG: ON CONFLICT DO UPDATE)"""
+        """UPSERT로 DB 저장 (ON CONFLICT DO UPDATE)"""
         if not rows:
             return 0
-
-        from app.database import _is_postgresql
-        is_pg = _is_postgresql(str(self.engine.url))
 
         _cols = """(account_id, ad_date, campaign_id, campaign_name,
                          ad_type, ad_objective, daily_budget,
@@ -220,19 +205,16 @@ class AdSpendSync:
                          :spent_amount, :adjustment, :spent_after_adjust,
                          :over_spend, :billable_cost, :vat_amount, :total_charge)"""
 
-        if is_pg:
-            _update_cols = ", ".join(
-                f"{c} = EXCLUDED.{c}" for c in [
-                    "campaign_name", "ad_type", "ad_objective", "daily_budget",
-                    "spent_amount", "adjustment", "spent_after_adjust",
-                    "over_spend", "billable_cost", "vat_amount", "total_charge",
-                ]
-            )
-            sql = f"""INSERT INTO ad_spends {_cols} VALUES {_vals}
-                ON CONFLICT (account_id, ad_date, campaign_id)
-                DO UPDATE SET {_update_cols}"""
-        else:
-            sql = f"INSERT OR REPLACE INTO ad_spends {_cols} VALUES {_vals}"
+        _update_cols = ", ".join(
+            f"{c} = EXCLUDED.{c}" for c in [
+                "campaign_name", "ad_type", "ad_objective", "daily_budget",
+                "spent_amount", "adjustment", "spent_after_adjust",
+                "over_spend", "billable_cost", "vat_amount", "total_charge",
+            ]
+        )
+        sql = f"""INSERT INTO ad_spends {_cols} VALUES {_vals}
+            ON CONFLICT (account_id, ad_date, campaign_id)
+            DO UPDATE SET {_update_cols}"""
 
         upserted = 0
         with self.engine.connect() as conn:

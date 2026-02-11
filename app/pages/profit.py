@@ -21,12 +21,10 @@ from app.dashboard_utils import (
     query_df,
     fmt_krw,
     engine,
-    _is_pg,
 )
 
 logger = logging.getLogger(__name__)
 ROOT = Path(__file__).resolve().parent.parent.parent
-DB_PATH = ROOT / "coupang_auto.db"
 
 # 택배비 단가 (원)
 COURIER_COST = 2300
@@ -35,65 +33,6 @@ DEFAULT_SUPPLY_RATE = 0.6
 
 
 # ─── 헬퍼 ───
-
-def _ensure_tables():
-    """SQLite 전용: 필요한 테이블 보장"""
-    if _is_pg:
-        return
-    with engine.connect() as conn:
-        conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS revenue_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                account_id INTEGER NOT NULL REFERENCES accounts(id),
-                order_id BIGINT NOT NULL,
-                sale_type VARCHAR(10) NOT NULL,
-                sale_date DATE NOT NULL,
-                recognition_date DATE NOT NULL,
-                settlement_date DATE,
-                product_id BIGINT,
-                product_name VARCHAR(500),
-                vendor_item_id BIGINT,
-                vendor_item_name VARCHAR(500),
-                sale_price INTEGER DEFAULT 0,
-                quantity INTEGER DEFAULT 0,
-                coupang_discount INTEGER DEFAULT 0,
-                sale_amount INTEGER DEFAULT 0,
-                seller_discount INTEGER DEFAULT 0,
-                service_fee INTEGER DEFAULT 0,
-                service_fee_vat INTEGER DEFAULT 0,
-                service_fee_ratio REAL,
-                settlement_amount INTEGER DEFAULT 0,
-                delivery_fee_amount INTEGER DEFAULT 0,
-                delivery_fee_settlement INTEGER DEFAULT 0,
-                listing_id INTEGER REFERENCES listings(id),
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(account_id, order_id, vendor_item_id)
-            )
-        """))
-        conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS ad_spends (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                account_id INTEGER NOT NULL REFERENCES accounts(id),
-                ad_date DATE NOT NULL,
-                campaign_id VARCHAR(50) NOT NULL,
-                campaign_name VARCHAR(200),
-                ad_type VARCHAR(20),
-                ad_objective VARCHAR(50),
-                daily_budget INTEGER DEFAULT 0,
-                spent_amount INTEGER DEFAULT 0,
-                adjustment INTEGER DEFAULT 0,
-                spent_after_adjust INTEGER DEFAULT 0,
-                over_spend INTEGER DEFAULT 0,
-                billable_cost INTEGER DEFAULT 0,
-                vat_amount INTEGER DEFAULT 0,
-                total_charge INTEGER DEFAULT 0,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(account_id, ad_date, campaign_id)
-            )
-        """))
-        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_ad_account_date ON ad_spends(account_id, ad_date)"))
-        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_ad_date ON ad_spends(ad_date)"))
-        conn.commit()
 
 
 def _delta(cur, prev):
@@ -219,9 +158,6 @@ def render(selected_account, accounts_df, account_names):
     prev_date_from = prev_date_to - timedelta(days=days_back)
     prev_from_str = prev_date_from.isoformat()
     prev_to_str = prev_date_to.isoformat()
-
-    # ── 테이블 보장 ──
-    _ensure_tables()
 
     # ── 동기화 ──
     if btn_sync:

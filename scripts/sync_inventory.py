@@ -26,7 +26,7 @@ from sqlalchemy import text, inspect
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
-from app.database import get_engine_for_db, _is_postgresql
+from app.database import get_engine_for_db
 
 from dotenv import load_dotenv
 load_dotenv(ROOT / ".env")
@@ -43,33 +43,25 @@ logger = logging.getLogger(__name__)
 class InventorySync:
     """가격/재고 동기화 엔진"""
 
-    # inventory_sync_log 테이블 DDL
+    # inventory_sync_log 테이블 DDL (PostgreSQL)
     CREATE_LOG_TABLE_SQL = """
     CREATE TABLE IF NOT EXISTS inventory_sync_log (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         listing_id INTEGER NOT NULL REFERENCES listings(id),
         action VARCHAR(20) NOT NULL,
         old_price INTEGER,
         new_price INTEGER,
         old_quantity INTEGER,
         new_quantity INTEGER,
-        success BOOLEAN DEFAULT 1,
+        success BOOLEAN DEFAULT true,
         error_message TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        created_at TIMESTAMP DEFAULT NOW()
     )
     """
-
-    # listings 테이블에 추가할 컬럼
-    LISTING_NEW_COLS = {
-        "vendor_item_id": "VARCHAR(50)",
-        "coupang_sale_price": "INTEGER DEFAULT 0",
-        "stock_quantity": "INTEGER DEFAULT 10",
-    }
 
     def __init__(self, db_path: str = None):
         self.engine = get_engine_for_db(db_path)
         self._ensure_tables()
-        self._migrate_listing_columns()
 
     def _ensure_tables(self):
         """동기화 로그 테이블 생성"""
@@ -80,23 +72,6 @@ class InventorySync:
             ))
             conn.commit()
         logger.info("inventory_sync_log 테이블 확인 완료")
-
-    def _migrate_listing_columns(self):
-        """listings 테이블에 새 컬럼 추가 (기존 DB 호환)"""
-        try:
-            inspector = inspect(self.engine)
-            existing_cols = {col["name"] for col in inspector.get_columns("listings")}
-        except Exception:
-            return  # 테이블 아직 없음
-
-        with self.engine.connect() as conn:
-            for col_name, col_type in self.LISTING_NEW_COLS.items():
-                if col_name not in existing_cols:
-                    conn.execute(text(
-                        f"ALTER TABLE listings ADD COLUMN {col_name} {col_type}"
-                    ))
-                    logger.info(f"  컬럼 추가: listings.{col_name}")
-            conn.commit()
 
     def _get_accounts(self, account_name: str = None) -> list:
         """WING API 활성 계정 조회 (SQL 인젝션 방지)"""
