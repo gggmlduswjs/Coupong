@@ -38,8 +38,8 @@ class Order(Base):
     receiver_post_code = Column(String(10))  # 우편번호
 
     # 상품 정보
-    product_id = Column(Integer)             # 쿠팡 productId
-    seller_product_id = Column(Integer)      # 등록상품ID
+    product_id = Column(BigInteger)          # 쿠팡 productId
+    seller_product_id = Column(BigInteger)   # 등록상품ID
     seller_product_name = Column(String(500))  # 등록상품명
     vendor_item_name = Column(String(500))     # 노출상품명
 
@@ -55,7 +55,7 @@ class Order(Base):
     # 배송 정보
     delivery_company_name = Column(String(50))   # 택배사
     invoice_number = Column(String(50))          # 운송장번호
-    shipment_type = Column(String(20))           # THIRD_PARTY/CGF/CGF LITE
+    shipment_type = Column(String(50))           # THIRD_PARTY/CGF/CGF LITE
 
     # 완료 정보
     delivered_date = Column(DateTime)   # 배송완료일

@@ -13,6 +13,8 @@ class Listing(Base):
     __table_args__ = (
         # 중복 방지: 동일 계정 + 동일 묶음키
         UniqueConstraint("account_id", "bundle_key", name="uix_account_bundle"),
+        # 중복 방지: 동일 계정 + 동일 ISBN
+        UniqueConstraint("account_id", "isbn", name="uix_account_isbn"),
     )
 
     id = Column(Integer, primary_key=True, index=True)

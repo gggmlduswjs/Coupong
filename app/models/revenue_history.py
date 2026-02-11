@@ -21,7 +21,7 @@ class RevenueHistory(Base):
 
     # 주문 정보
     order_id = Column(BigInteger, nullable=False)
-    sale_type = Column(String(10), nullable=False)  # SALE / REFUND
+    sale_type = Column(String(50), nullable=False)  # SALE / REFUND
     sale_date = Column(Date, nullable=False)
     recognition_date = Column(Date, nullable=False)
     settlement_date = Column(Date)

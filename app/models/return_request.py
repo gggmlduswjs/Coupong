@@ -25,7 +25,7 @@ class ReturnRequest(Base):
     payment_id = Column(BigInteger)                   # 결제번호
 
     # 유형/상태
-    receipt_type = Column(String(10))    # RETURN / CANCEL
+    receipt_type = Column(String(50))    # RETURN / CANCEL
     receipt_status = Column(String(40))  # RELEASE_STOP_UNCHECKED / RETURNS_UNCHECKED / VENDOR_WAREHOUSE_CONFIRM / REQUEST_COUPANG_CHECK / RETURNS_COMPLETED
 
     # API 일시
@@ -49,11 +49,11 @@ class ReturnRequest(Base):
 
     # 배송
     return_delivery_id = Column(BigInteger)
-    return_delivery_type = Column(String(20))
+    return_delivery_type = Column(String(50))
     release_stop_status = Column(String(30))
 
     # 귀책
-    fault_by_type = Column(String(20))   # COUPANG / VENDOR / CUSTOMER / WMS / GENERAL
+    fault_by_type = Column(String(50))   # COUPANG / VENDOR / CUSTOMER / WMS / GENERAL
 
     # 환불
     pre_refund = Column(Boolean)
