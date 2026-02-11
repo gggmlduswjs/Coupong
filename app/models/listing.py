@@ -26,7 +26,7 @@ class Listing(Base):
     product_type = Column(String(20), nullable=False, index=True)  # 'single', 'bundle'
     product_id = Column(Integer, ForeignKey("products.id"), index=True)  # 단권용
     bundle_id = Column(Integer, ForeignKey("bundle_skus.id"), index=True)  # 묶음용
-    isbn = Column(String(13), index=True)  # 단권용
+    isbn = Column(Text, index=True)  # ISBN (단권: 단일, 세트: 쉼표 구분)
     bundle_key = Column(String(200), index=True)  # 묶음용
 
     # 쿠팡 정보

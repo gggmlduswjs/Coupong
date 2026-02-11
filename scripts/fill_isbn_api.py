@@ -8,35 +8,55 @@ os.chdir(os.path.join(os.path.dirname(__file__), '..'))
 from dotenv import load_dotenv
 load_dotenv()
 
-from sqlalchemy import text
+from sqlalchemy import text, create_engine
 from app.api.coupang_wing_client import CoupangWingClient
-from app.database import engine
+
+# 백업 DB 사용
+DB_PATH = r'C:\Users\user\Desktop\Coupong\coupang_auto_backup.db'
+engine = create_engine(f'sqlite:///{DB_PATH}')
 isbn_re = re.compile(r'97[89]\d{10}')
 
 
 def extract_isbn_from_detail(detail):
+    """상품 상세에서 모든 ISBN 추출 (세트 상품 지원)"""
     data = detail.get("data", {})
     if not isinstance(data, dict):
         return ""
+
+    isbn_set = set()  # 중복 제거용
     items = data.get("items", [])
+
     for item in items:
+        # barcode, externalVendorSku에서 ISBN 추출
         for field in ["barcode", "externalVendorSku"]:
             val = str(item.get(field, ""))
             m = isbn_re.search(val)
             if m:
-                return m.group()
+                isbn_set.add(m.group())
+
+        # searchTags에서 ISBN 추출
         for tag in (item.get("searchTags") or []):
             m = isbn_re.search(str(tag))
             if m:
-                return m.group()
-    return ""
+                isbn_set.add(m.group())
+
+    # 쉼표로 구분하여 반환
+    return ",".join(sorted(isbn_set)) if isbn_set else ""
 
 
 with engine.connect() as conn:
+    # 007-book 계정만 처리
     accounts = conn.execute(text(
         'SELECT id, vendor_id, wing_access_key, wing_secret_key '
-        'FROM accounts WHERE is_active=1 AND wing_api_enabled=1'
+        'FROM accounts WHERE is_active=1 AND wing_api_enabled=1 AND account_name="007-book"'
     )).fetchall()
+
+    if not accounts:
+        print('007-book 계정을 찾을 수 없습니다. 전체 계정으로 처리합니다.')
+        accounts = conn.execute(text(
+            'SELECT id, vendor_id, wing_access_key, wing_secret_key '
+            'FROM accounts WHERE is_active=1 AND wing_api_enabled=1'
+        )).fetchall()
 
     clients = {}
     for a in accounts:
@@ -45,11 +65,15 @@ with engine.connect() as conn:
     rows = conn.execute(text(
         "SELECT id, account_id, coupang_product_id FROM listings "
         "WHERE isbn IS NULL AND coupang_product_id IS NOT NULL AND coupang_product_id != '' "
-        "ORDER BY account_id"
+        "AND account_id = 1 "  # 007-book만
+        "ORDER BY account_id LIMIT 10"  # 테스트로 10개만
     )).fetchall()
 
     total = len(rows)
-    print(f'처리 대상: {total}개')
+    print(f'\n=== 007-book 계정 ISBN 채우기 ===')
+    print(f'활성 계정: {len(accounts)}개')
+    print(f'처리 대상: {total}개 (ISBN이 NULL인 listings)')
+    print(f'세트 상품의 경우 쉼표로 구분된 여러 ISBN 저장\n')
     filled = 0
     failed = 0
     skipped = 0
@@ -79,8 +103,12 @@ with engine.connect() as conn:
                         conn.commit()
             else:
                 failed += 1
+                if failed <= 3:  # 처음 3개 실패만 출력
+                    print(f'  [실패 {failed}] product_id={cpid}: ISBN 추출 실패')
         except Exception as e:
             failed += 1
+            if failed <= 3:  # 처음 3개 에러만 출력
+                print(f'  [에러 {failed}] product_id={cpid}: {str(e)[:100]}')
 
     conn.commit()
     print(f'\n완료: filled={filled}, failed={failed}, skipped={skipped}')
