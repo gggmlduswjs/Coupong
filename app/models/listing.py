@@ -23,6 +23,9 @@ class Listing(Base):
         Index("ix_listing_account_status", "account_id", "coupang_status"),
         Index("ix_listing_account_vendor_item", "account_id", "vendor_item_id"),
         Index("ix_listing_isbn", "isbn"),
+        Index("ix_listing_product_id", "product_id"),
+        Index("ix_listing_bundle_id", "bundle_id"),
+        Index("ix_listing_synced_at", "synced_at"),
     )
 
     id = Column(Integer, primary_key=True)
@@ -112,8 +115,3 @@ class Listing(Base):
         """API 업데이트 가능 여부 (vendor_item_id 필수)"""
         return bool(self.vendor_item_id) and self.coupang_status == 'active'
 
-    def _extract_isbns(self) -> list:
-        """isbn 필드에서 ISBN 리스트 추출"""
-        if not self.isbn:
-            return []
-        return [i.strip() for i in self.isbn.split(",") if i.strip()]

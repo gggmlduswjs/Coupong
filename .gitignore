@@ -68,6 +68,15 @@ nul
 *.bak
 ~$*
 
+# Excel files (임시 데이터)
+*.xlsx
+
+# Output cache
+output/
+
+# Pytest cache
+.pytest_cache/
+
 # Claude Code
 .claude/projects/
 
