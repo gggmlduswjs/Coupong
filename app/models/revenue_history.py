@@ -14,6 +14,8 @@ class RevenueHistory(Base):
         Index("ix_rev_account_date", "account_id", "recognition_date"),
         Index("ix_rev_recognition", "recognition_date"),
         Index("ix_rev_listing", "listing_id"),
+        Index("ix_rev_sale_type", "sale_type"),
+        Index("ix_rev_sale_date", "sale_date"),
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)

@@ -18,7 +18,17 @@ from app.database import engine
 
 @st.cache_data(ttl=10)
 def query_df(sql: str, params: dict = None) -> pd.DataFrame:
-    """SQL → DataFrame (10초 캐시)"""
+    """SQL → DataFrame (10초 캐시, 실시간 데이터용)"""
+    try:
+        return pd.read_sql(text(sql), engine, params=params)
+    except Exception as e:
+        st.error(f"DB 오류: {e}")
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=300)
+def query_df_cached(sql: str, params: dict = None) -> pd.DataFrame:
+    """SQL → DataFrame (5분 캐시, 정적/준정적 데이터용: 리스팅 메타, 출판사, 상품 등)"""
     try:
         return pd.read_sql(text(sql), engine, params=params)
     except Exception as e:
@@ -83,7 +93,7 @@ def product_to_upload_data(row):
     return {
         "product_name": row.get("title", ""),
         "publisher": row.get("publisher_name", ""),
-        "author": "",
+        "author": row.get("author", ""),
         "isbn": row.get("isbn", ""),
         "original_price": int(row.get("list_price", 0)),
         "sale_price": int(row.get("sale_price", 0)),

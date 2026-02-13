@@ -4,11 +4,14 @@
 결제완료 → 발주서 → 배송 → 출고/극동 워크플로우.
 """
 import io
+import json
+import logging
 import re
 from datetime import date, datetime, timedelta
 
 import pandas as pd
 import streamlit as st
+from sqlalchemy import text as sa_text
 from st_aggrid import AgGrid, GridOptionsBuilder
 
 from app.api.coupang_wing_client import CoupangWingError
@@ -23,165 +26,241 @@ from app.dashboard_utils import (
     fmt_krw,
     fmt_money_df,
     query_df,
+    query_df_cached,
     render_grid,
     run_sql,
 )
+logger = logging.getLogger(__name__)
+
+# ── 주문 DB 저장용 UPSERT SQL ──
+_UPSERT_ORDER_SQL = """
+    INSERT INTO orders
+        (account_id, shipment_box_id, order_id, vendor_item_id,
+         status, ordered_at, paid_at,
+         orderer_name, receiver_name, receiver_addr, receiver_post_code,
+         product_id, seller_product_id, seller_product_name, vendor_item_name,
+         shipping_count, cancel_count, hold_count_for_cancel,
+         sales_price, order_price, discount_price, shipping_price,
+         delivery_company_name, invoice_number, shipment_type,
+         delivered_date, confirm_date,
+         refer, canceled, listing_id, raw_json, updated_at)
+    VALUES
+        (:account_id, :shipment_box_id, :order_id, :vendor_item_id,
+         :status, :ordered_at, :paid_at,
+         :orderer_name, :receiver_name, :receiver_addr, :receiver_post_code,
+         :product_id, :seller_product_id, :seller_product_name, :vendor_item_name,
+         :shipping_count, :cancel_count, :hold_count_for_cancel,
+         :sales_price, :order_price, :discount_price, :shipping_price,
+         :delivery_company_name, :invoice_number, :shipment_type,
+         :delivered_date, :confirm_date,
+         :refer, :canceled, :listing_id, :raw_json, :updated_at)
+    ON CONFLICT (account_id, shipment_box_id, vendor_item_id) DO UPDATE SET
+        status=EXCLUDED.status, ordered_at=EXCLUDED.ordered_at, paid_at=EXCLUDED.paid_at,
+        orderer_name=EXCLUDED.orderer_name, receiver_name=EXCLUDED.receiver_name,
+        receiver_addr=EXCLUDED.receiver_addr, receiver_post_code=EXCLUDED.receiver_post_code,
+        product_id=EXCLUDED.product_id, seller_product_id=EXCLUDED.seller_product_id,
+        seller_product_name=EXCLUDED.seller_product_name, vendor_item_name=EXCLUDED.vendor_item_name,
+        shipping_count=EXCLUDED.shipping_count, cancel_count=EXCLUDED.cancel_count,
+        hold_count_for_cancel=EXCLUDED.hold_count_for_cancel,
+        sales_price=EXCLUDED.sales_price, order_price=EXCLUDED.order_price,
+        discount_price=EXCLUDED.discount_price, shipping_price=EXCLUDED.shipping_price,
+        delivery_company_name=EXCLUDED.delivery_company_name, invoice_number=EXCLUDED.invoice_number,
+        shipment_type=EXCLUDED.shipment_type, delivered_date=EXCLUDED.delivered_date,
+        confirm_date=EXCLUDED.confirm_date, refer=EXCLUDED.refer, canceled=EXCLUDED.canceled,
+        listing_id=EXCLUDED.listing_id, raw_json=EXCLUDED.raw_json, updated_at=EXCLUDED.updated_at
+"""
+
+
+def _parse_dt(val):
+    """날짜/시간 문자열 파싱"""
+    if not val:
+        return None
+    return str(val)[:19]
+
+
+def _extract_price(val):
+    """v4 plain int / v5 {units, nanos} 파싱"""
+    if val is None:
+        return 0
+    if isinstance(val, dict):
+        return int(val.get("units", 0) or 0)
+    return int(val or 0)
+
+
+def _save_ordersheets_to_db(acct, ordersheets, status):
+    """WING API 응답 → orders 테이블 UPSERT (백그라운드 스레드, match_listing 생략)"""
+    if not ordersheets:
+        return
+
+    def _do_save():
+        account_id = int(acct["id"])
+        try:
+            with engine.connect() as conn:
+                for os_data in ordersheets:
+                    shipment_box_id = os_data.get("shipmentBoxId")
+                    order_id = os_data.get("orderId")
+                    if not shipment_box_id or not order_id:
+                        continue
+                    order_items = os_data.get("orderItems", [])
+                    if not order_items:
+                        order_items = [os_data]
+                    orderer = os_data.get("orderer") or {}
+                    receiver = os_data.get("receiver") or {}
+                    addr1 = receiver.get("addr1", "") or ""
+                    addr2 = receiver.get("addr2", "") or ""
+                    receiver_addr = f"{addr1} {addr2}".strip()
+                    for item in order_items:
+                        v_item_id = item.get("vendorItemId") or os_data.get("vendorItemId")
+                        sp_id = item.get("sellerProductId") or os_data.get("sellerProductId")
+                        sp_name = item.get("sellerProductName") or os_data.get("sellerProductName", "")
+                        params = {
+                            "account_id": account_id,
+                            "shipment_box_id": int(shipment_box_id),
+                            "order_id": int(order_id),
+                            "vendor_item_id": int(v_item_id) if v_item_id else 0,
+                            "status": status,
+                            "ordered_at": _parse_dt(os_data.get("orderedAt")),
+                            "paid_at": _parse_dt(os_data.get("paidAt")),
+                            "orderer_name": orderer.get("name", ""),
+                            "receiver_name": receiver.get("name", ""),
+                            "receiver_addr": receiver_addr,
+                            "receiver_post_code": receiver.get("postCode", ""),
+                            "product_id": int(item.get("productId") or 0) or None,
+                            "seller_product_id": int(sp_id) if sp_id else None,
+                            "seller_product_name": sp_name,
+                            "vendor_item_name": item.get("vendorItemName") or "",
+                            "shipping_count": int(item.get("shippingCount", 0) or 0),
+                            "cancel_count": int(item.get("cancelCount", 0) or 0),
+                            "hold_count_for_cancel": int(item.get("holdCountForCancel", 0) or 0),
+                            "sales_price": _extract_price(item.get("salesPrice")),
+                            "order_price": _extract_price(item.get("orderPrice")),
+                            "discount_price": _extract_price(item.get("discountPrice")),
+                            "shipping_price": _extract_price(os_data.get("shippingPrice")),
+                            "delivery_company_name": os_data.get("deliveryCompanyName", ""),
+                            "invoice_number": os_data.get("invoiceNumber", ""),
+                            "shipment_type": os_data.get("shipmentType", ""),
+                            "delivered_date": _parse_dt(os_data.get("deliveredDate")),
+                            "confirm_date": _parse_dt(item.get("confirmDate")),
+                            "refer": os_data.get("refer", ""),
+                            "canceled": bool(item.get("canceled", False)),
+                            "listing_id": None,
+                            "raw_json": json.dumps(os_data, ensure_ascii=False, default=str)[:5000],
+                            "updated_at": datetime.utcnow().isoformat(),
+                        }
+                        try:
+                            conn.execute(sa_text(_UPSERT_ORDER_SQL), params)
+                        except Exception:
+                            pass
+                conn.commit()
+        except Exception as e:
+            logger.warning(f"주문 DB 저장 오류: {e}")
+
+    import threading
+    threading.Thread(target=_do_save, daemon=True).start()
 
 
 def render(selected_account, accounts_df, account_names):
     st.title("주문 관리")
 
-    # ── WING API 실시간 주문 조회 ──
-    _LIVE_CACHE_TTL = 120  # 2분 캐시
+    # ── DB 기반 주문 조회 (단일 쿼리, 즉시 로드) ──
 
-    def _fetch_live_orders(status):
-        """WING API에서 전 계정 실시간 주문 조회 (session_state 캐시)"""
-        cache_key = f"_live_{status}"
-        ts_key = f"_live_{status}_ts"
-        now = datetime.utcnow().timestamp()
+    @st.cache_data(ttl=30)
+    def _load_all_orders_from_db():
+        """DB에서 최근 30일 전체 주문 1회 조회 — 이후 Python에서 필터"""
+        _from = (date.today() - timedelta(days=30)).isoformat()
+        return query_df("""
+            SELECT a.account_name AS "계정",
+                   o.shipment_box_id AS "묶음배송번호",
+                   o.order_id AS "주문번호",
+                   o.seller_product_name AS "상품명",
+                   o.vendor_item_name AS "옵션명",
+                   o.shipping_count AS "수량",
+                   o.order_price AS "결제금액",
+                   to_char(o.ordered_at, 'YYYY-MM-DD') AS "주문일",
+                   o.receiver_name AS "수취인",
+                   o.status AS "상태",
+                   o.delivery_company_name AS "택배사",
+                   o.invoice_number AS "운송장번호",
+                   to_char(o.delivered_date, 'YYYY-MM-DD') AS "배송완료일",
+                   COALESCE(o.canceled, false) AS "취소",
+                   o.account_id AS "_account_id",
+                   o.vendor_item_id AS "_vendor_item_id",
+                   o.seller_product_id AS "_seller_product_id",
+                   o.order_price AS "_order_price_raw",
+                   to_char(o.ordered_at, 'YYYY-MM-DD HH24:MI:SS') AS "주문일시",
+                   o.orderer_name AS "구매자",
+                   '' AS "구매자전화번호",
+                   '' AS "수취인전화번호",
+                   o.receiver_post_code AS "우편번호",
+                   o.receiver_addr AS "수취인주소",
+                   '' AS "배송메세지",
+                   COALESCE(o.shipping_price, 0) AS "배송비",
+                   0 AS "도서산간추가배송비",
+                   COALESCE(o.refer, '') AS "결제위치",
+                   false AS "분리배송가능",
+                   '' AS "주문시출고예정일",
+                   '' AS "배송비구분",
+                   COALESCE(o.sales_price, 0) AS "판매단가",
+                   '' AS "최초등록상품옵션명",
+                   '' AS "업체상품코드",
+                   '' AS "개인통관번호",
+                   '' AS "통관용전화번호"
+            FROM orders o
+            JOIN accounts a ON o.account_id = a.id
+            WHERE o.ordered_at >= :date_from
+            ORDER BY o.ordered_at DESC
+        """, {"date_from": _from})
 
-        if cache_key in st.session_state and (now - st.session_state.get(ts_key, 0)) < _LIVE_CACHE_TTL:
-            return st.session_state[cache_key]
+    def _sync_live_orders():
+        """WING API 병렬 호출 → DB 저장 → 페이지 새로고침"""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        rows = []
         _today = date.today()
-        # ACCEPT/INSTRUCT는 미처리 주문이므로 최근 7일 조회
-        _ranges = [
-            ((_today - timedelta(days=7)).isoformat(), _today.isoformat()),
-        ]
-
-        for _, acct in accounts_df.iterrows():
-            client = create_wing_client(acct)
-            if not client:
-                continue
-            ordersheets = []
-            for _rf, _rt in _ranges:
-                try:
-                    ordersheets.extend(client.get_all_ordersheets(_rf, _rt, status=status))
-                except Exception:
-                    continue
-
-            for os_data in ordersheets:
-                shipment_box_id = os_data.get("shipmentBoxId")
-                order_id = os_data.get("orderId")
-                if not shipment_box_id:
-                    continue
-                receiver = os_data.get("receiver") or {}
-                orderer = os_data.get("orderer") or {}
-                overseas = os_data.get("overseaShippingInfoDto") or {}
-                ordered_at = str(os_data.get("orderedAt", ""))[:10]
-                ordered_at_full = str(os_data.get("orderedAt", ""))
-                order_items = os_data.get("orderItems", [])
-                if not order_items:
-                    order_items = [os_data]
-                for item in order_items:
-                    rows.append({
-                        "계정": acct["account_name"],
-                        "묶음배송번호": int(shipment_box_id),
-                        "주문번호": int(order_id),
-                        "상품명": item.get("sellerProductName") or os_data.get("sellerProductName", ""),
-                        "옵션명": item.get("vendorItemName", ""),
-                        "수량": int(item.get("shippingCount", 0) or 0),
-                        "결제금액": int(item.get("orderPrice", 0) or 0),
-                        "주문일": ordered_at,
-                        "수취인": receiver.get("name", ""),
-                        "상태": status,
-                        "택배사": item.get("deliveryCompanyName") or os_data.get("deliveryCompanyName", ""),
-                        "운송장번호": item.get("invoiceNumber") or os_data.get("invoiceNumber", ""),
-                        "배송완료일": str(os_data.get("deliveredDate") or "")[:10],
-                        "취소": bool(item.get("canceled")),
-                        "_account_id": int(acct["id"]),
-                        "_vendor_item_id": int(item.get("vendorItemId", 0) or 0),
-                        "_seller_product_id": item.get("sellerProductId") or os_data.get("sellerProductId", ""),
-                        "_order_price_raw": int(item.get("orderPrice", 0) or 0),
-                        # 배송리스트용 상세 필드
-                        "주문일시": ordered_at_full,
-                        "구매자": orderer.get("name", ""),
-                        "구매자전화번호": orderer.get("safeNumber", ""),
-                        "수취인전화번호": receiver.get("safeNumber", ""),
-                        "우편번호": receiver.get("postCode", ""),
-                        "수취인주소": f"{receiver.get('addr1', '')} {receiver.get('addr2', '')}".strip(),
-                        "배송메세지": os_data.get("parcelPrintMessage", ""),
-                        "배송비": int(os_data.get("shippingPrice", 0) or 0),
-                        "도서산간추가배송비": int(os_data.get("remotePrice", 0) or 0),
-                        "결제위치": os_data.get("refer", ""),
-                        "분리배송가능": os_data.get("ableSplitShipping", False),
-                        "주문시출고예정일": item.get("estimatedShippingDate", ""),
-                        "배송비구분": item.get("deliveryChargeTypeName", ""),
-                        "판매단가": int(item.get("salesPrice", 0) or 0),
-                        "최초등록상품옵션명": f"{item.get('firstSellerProductItemName', '')},{item.get('vendorItemName', '')}",
-                        "업체상품코드": item.get("externalVendorSkuCode", ""),
-                        "개인통관번호": overseas.get("personalCustomsClearanceCode", ""),
-                        "통관용전화번호": overseas.get("ordererPhoneNumber", ""),
-                    })
-
-        df = pd.DataFrame(rows) if rows else pd.DataFrame()
-        st.session_state[cache_key] = df
-        st.session_state[ts_key] = now
-        return df
-
-    def _fetch_all_live_orders():
-        """ACCEPT + INSTRUCT 실시간 주문 조회 (concat)"""
-        cache_key = "_live_ALL"
-        ts_key = "_live_ALL_ts"
-        now = datetime.utcnow().timestamp()
-
-        if cache_key in st.session_state and (now - st.session_state.get(ts_key, 0)) < _LIVE_CACHE_TTL:
-            return st.session_state[cache_key]
-
-        frames = []
-        for _s in ["ACCEPT", "INSTRUCT"]:
-            _df = _fetch_live_orders(_s)
-            if not _df.empty:
-                frames.append(_df)
-        result = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-        st.session_state[cache_key] = result
-        st.session_state[ts_key] = now
-        return result
-
-    def _clear_order_caches():
-        """주문 관련 캐시 전체 삭제"""
-        for _k in list(st.session_state.keys()):
-            if _k.startswith("_live_") or _k.startswith("_kpi_"):
-                del st.session_state[_k]
-
-    def _fetch_kpi_count(status, days=7, cache_ttl=120):
-        """KPI용: WING API에서 상태별 발주서 건수 조회 (묶음배송 단위, 계정별 dict)"""
-        cache_key = f"_kpi_{status}_{days}d"
-        ts_key = f"_kpi_{status}_{days}d_ts"
-        now = datetime.utcnow().timestamp()
-
-        if cache_key in st.session_state and (now - st.session_state.get(ts_key, 0)) < cache_ttl:
-            return st.session_state[cache_key]
-
-        counts = {}
-        _today = date.today()
-        _from = (_today - timedelta(days=days)).isoformat()
+        _from = (_today - timedelta(days=7)).isoformat()
         _to = _today.isoformat()
 
+        acct_clients = []
         for _, acct in accounts_df.iterrows():
             client = create_wing_client(acct)
-            if not client:
-                continue
-            try:
-                orders = client.get_all_ordersheets(_from, _to, status=status)
-                if orders:
-                    counts[acct["account_name"]] = len(orders)
-            except Exception:
-                continue
+            if client:
+                acct_clients.append((acct, client))
 
-        st.session_state[cache_key] = counts
-        st.session_state[ts_key] = now
-        return counts
+        def _fetch_one(acct, client, status):
+            try:
+                return acct, status, client.get_all_ordersheets(_from, _to, status=status)
+            except Exception:
+                return acct, status, []
+
+        total = 0
+        with ThreadPoolExecutor(max_workers=10) as pool:
+            futures = []
+            for acct, client in acct_clients:
+                for status in ["ACCEPT", "INSTRUCT"]:
+                    futures.append(pool.submit(_fetch_one, acct, client, status))
+            for f in as_completed(futures):
+                acct, status, ordersheets = f.result()
+                if ordersheets:
+                    _save_ordersheets_to_db(acct, ordersheets, status)
+                    total += len(ordersheets)
+        return total
+
+    def _clear_order_caches():
+        """캐시 초기화"""
+        _load_all_orders_from_db.clear()
+        st.cache_data.clear()
 
     # ── 상단 컨트롤 ──
     _top_c1, _top_c2 = st.columns(2)
     with _top_c1:
-        if st.button("캐시 새로고침", key="btn_live_refresh", use_container_width=True):
+        if st.button("실시간 동기화", key="btn_live_refresh", use_container_width=True):
+            with st.spinner("WING API 조회 중..."):
+                _synced = _sync_live_orders()
             _clear_order_caches()
+            st.success(f"동기화 완료: {_synced}건")
+            import time; time.sleep(0.5)
             st.rerun()
     with _top_c2:
-        if st.button("DB 주문 동기화 (당일)", key="btn_sync_orders", use_container_width=True):
+        if st.button("전체 동기화 (7일)", key="btn_sync_orders", use_container_width=True):
             try:
                 from scripts.sync_orders import OrderSync
                 _syncer = OrderSync()
@@ -192,13 +271,14 @@ def render(selected_account, accounts_df, account_names):
                     _sync_bar.progress((_si) / len(_sync_accounts), text=f"[{_sa['account_name']}] 동기화 중...")
                     _sr = _syncer.sync_account(
                         _sa,
-                        date_from=date.today(),
+                        date_from=date.today() - timedelta(days=7),
                         date_to=date.today(),
                     )
                     _sync_results.append(_sr)
                 _sync_bar.progress(1.0, text="동기화 완료!")
                 _total_upserted = sum(r["upserted"] for r in _sync_results)
                 _total_fetched = sum(r["fetched"] for r in _sync_results)
+                _clear_order_caches()
                 st.success(f"동기화 완료: {len(_sync_accounts)}개 계정, {_total_fetched}건 조회, {_total_upserted}건 저장")
                 for _sr in _sync_results:
                     st.caption(f"  [{_sr['account']}] 조회 {_sr['fetched']} / 저장 {_sr['upserted']} / 매칭 {_sr['matched']}")
@@ -221,15 +301,27 @@ def render(selected_account, accounts_df, account_names):
             return f"{val:,}"
 
     _ord_date_to_str = date.today().isoformat()
-    _ord_date_from_str = _ord_date_to_str
+    _ord_date_from_str = (date.today() - timedelta(days=30)).isoformat()
 
-    # ── 공유 데이터 + 실시간 KPI ──
-    with st.spinner("전 계정 주문 현황 조회 중..."):
-        _accept_all = _fetch_live_orders("ACCEPT")
-        _instruct_live = _fetch_live_orders("INSTRUCT")
-        _kpi_departure = _fetch_kpi_count("DEPARTURE", days=7, cache_ttl=120)
-        _kpi_delivering = _fetch_kpi_count("DELIVERING", days=30, cache_ttl=300)
-        _kpi_final = _fetch_kpi_count("FINAL_DELIVERY", days=30, cache_ttl=300)
+    # ── DB에서 즉시 로드 (단일 쿼리, 30초 캐시) ──
+    _all_orders = _load_all_orders_from_db()
+
+    def _filter_status(df, status):
+        if df.empty:
+            return pd.DataFrame()
+        return df[df["상태"] == status].copy()
+
+    def _kpi_count(df, status):
+        sub = _filter_status(df, status)
+        if sub.empty:
+            return {}
+        return sub.groupby("계정")["묶음배송번호"].nunique().to_dict()
+
+    _accept_all = _filter_status(_all_orders, "ACCEPT")
+    _instruct_live = _filter_status(_all_orders, "INSTRUCT")
+    _kpi_departure = _kpi_count(_all_orders, "DEPARTURE")
+    _kpi_delivering = _kpi_count(_all_orders, "DELIVERING")
+    _kpi_final = _kpi_count(_all_orders, "FINAL_DELIVERY")
     _instruct_all = _instruct_live[~_instruct_live["취소"]].copy() if not _instruct_live.empty else pd.DataFrame()
 
     # KPI 계정별 집계
@@ -272,7 +364,7 @@ def render(selected_account, accounts_df, account_names):
     # 탭1: 결제완료 (ACCEPT)
     # ══════════════════════════════════════
     with _ord_tab1:
-        st.caption("WING API 실시간 조회 (2분 캐시)")
+        st.caption("DB 기반 조회 (실시간 동기화 버튼으로 갱신)")
 
         # 계정 필터
         _t1_acct = st.selectbox("계정", ["전체"] + account_names, key="tab1_acct")
@@ -473,7 +565,7 @@ def render(selected_account, accounts_df, account_names):
                 st.info("발주서 대상 주문이 없습니다.")
             else:
                 # 출판사 매칭 (거래처 그룹핑용)
-                _pub_list = query_df("SELECT name FROM publishers WHERE is_active = true ORDER BY LENGTH(name) DESC")
+                _pub_list = query_df_cached("SELECT name FROM publishers WHERE is_active = true ORDER BY LENGTH(name) DESC")
                 _pub_names = _pub_list["name"].tolist() if not _pub_list.empty else []
 
                 def _match_pub(row):
@@ -482,16 +574,14 @@ def render(selected_account, accounts_df, account_names):
                         result = match_publisher_from_text(str(row.get("상품명") or ""), _pub_names)
                     return result
 
-                # ISBN 조회: listings → products → books (기본 JOIN) + ISBN → books (역조회)
-                _isbn_lookup = query_df("""
+                # ISBN 조회: listings.isbn → books (직접 매칭)
+                _isbn_lookup = query_df_cached("""
                     SELECT l.coupang_product_id,
-                           COALESCE(l.isbn, b.isbn) as isbn,
-                           COALESCE(b.title, b2.title) as db_title,
+                           l.isbn as isbn,
+                           b.title as db_title,
                            l.product_name as listing_name
                     FROM listings l
-                    LEFT JOIN products p ON l.product_id = p.id
-                    LEFT JOIN books b ON p.book_id = b.id
-                    LEFT JOIN books b2 ON l.isbn = b2.isbn AND l.isbn IS NOT NULL AND l.isbn != ''
+                    LEFT JOIN books b ON l.isbn = b.isbn AND l.isbn IS NOT NULL AND l.isbn != ''
                     WHERE l.coupang_product_id IS NOT NULL
                 """)
                 _isbn_map = {}
@@ -517,6 +607,21 @@ def render(selected_account, accounts_df, account_names):
 
                 _dist_orders[["도서명", "ISBN"]] = _dist_orders.apply(_resolve_book_info, axis=1)
                 _dist_df = _dist_orders
+
+                # ISBN 매칭 현황 표시
+                _isbn_found = _dist_df["ISBN"].apply(lambda x: bool(x and str(x).strip())).sum()
+                _isbn_total = len(_dist_df)
+                _isbn_missing = _isbn_total - _isbn_found
+                if _isbn_missing > 0:
+                    _missing_names = _dist_df[~_dist_df["ISBN"].apply(lambda x: bool(x and str(x).strip()))]["도서명"].unique()[:5]
+                    st.warning(f"ISBN 미매칭: {_isbn_missing}/{_isbn_total}건 — 리스팅 동기화(상품관리) 또는 fill_isbn 실행 필요. 예: {', '.join(_missing_names[:3])}")
+
+                # 발주서 날짜 범위: INSTRUCT 주문의 실제 주문일 범위
+                if "주문일" in _dist_df.columns and not _dist_df.empty:
+                    _dist_dates = _dist_df["주문일"].dropna()
+                    if not _dist_dates.empty:
+                        _ord_date_from_str = str(_dist_dates.min())
+                        _ord_date_to_str = str(_dist_dates.max())
 
                 _dist_df["출판사"] = _dist_df.apply(_match_pub, axis=1)
                 _dist_df["거래처"] = _dist_df["출판사"].apply(resolve_distributor)
@@ -959,23 +1064,20 @@ def render(selected_account, accounts_df, account_names):
             _gk_orders = pd.DataFrame(_gk_api_rows) if _gk_api_rows else pd.DataFrame()
 
             if not _gk_orders.empty:
-                # sellerProductId → listings → books 매칭
-                _gk_isbn_lookup = query_df("""
+                # sellerProductId → listings.isbn → books 매칭
+                _gk_isbn_lookup = query_df_cached("""
                     SELECT l.coupang_product_id,
-                           COALESCE(l.isbn, b.isbn) as "ISBN",
-                           COALESCE(b.title, b2.title) as "DB도서명",
+                           l.isbn as "ISBN",
+                           b.title as "DB도서명",
                            l.product_name as 리스팅도서명,
-                           COALESCE(b.list_price, b2.list_price) as 정가,
-                           '' as 저자,
-                           COALESCE(b.year, b2.year) as 출판년도,
-                           COALESCE(pub.name, pub2.name) as 출판사,
-                           COALESCE(pub.supply_rate, pub2.supply_rate) as 공급률
+                           b.list_price as 정가,
+                           COALESCE(b.author, '') as 저자,
+                           b.year as 출판년도,
+                           pub.name as 출판사,
+                           pub.supply_rate as 공급률
                     FROM listings l
-                    LEFT JOIN products p ON l.product_id = p.id
-                    LEFT JOIN books b ON p.book_id = b.id
+                    LEFT JOIN books b ON l.isbn = b.isbn AND l.isbn IS NOT NULL AND l.isbn != ''
                     LEFT JOIN publishers pub ON b.publisher_id = pub.id
-                    LEFT JOIN books b2 ON l.isbn = b2.isbn AND l.isbn IS NOT NULL AND l.isbn != ''
-                    LEFT JOIN publishers pub2 ON b2.publisher_id = pub2.id
                     WHERE l.coupang_product_id IS NOT NULL
                 """)
                 _gk_map = {}
@@ -1055,7 +1157,7 @@ def render(selected_account, accounts_df, account_names):
 
                     # 테이블 표시
                     _gk_show = _gk_agg[["상품바코드", "상품명", "수량", "출판사"]].copy()
-                    st.dataframe(_gk_show, hide_index=True, use_container_width=True)
+                    st.dataframe(_gk_show, hide_index=True, width="stretch")
 
                     # 극동 형식 엑셀 생성
                     _gk_result = pd.DataFrame()

@@ -65,8 +65,14 @@ def _create_engine_for_url(url: str):
         url,
         echo=False,
         pool_pre_ping=True,
-        pool_size=5,
-        max_overflow=10,
+        pool_size=10,
+        max_overflow=20,
+        pool_recycle=1800,       # 30분마다 커넥션 재활용 (stale 방지)
+        pool_timeout=10,         # 커넥션 대기 최대 10초
+        connect_args={
+            "connect_timeout": 5,           # DB 연결 타임아웃 5초
+            "options": "-c statement_timeout=30000",  # 쿼리 타임아웃 30초
+        },
     )
 
 

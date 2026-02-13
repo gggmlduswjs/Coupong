@@ -14,6 +14,8 @@ class ReturnRequest(Base):
         Index("ix_return_account_created", "account_id", "created_at_api"),
         Index("ix_return_account_status", "account_id", "receipt_status"),
         Index("ix_return_order_id", "order_id"),
+        Index("ix_return_listing_id", "listing_id"),
+        Index("ix_return_receipt_type", "receipt_type"),
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)

@@ -16,6 +16,7 @@ class Book(Base):
     # 기본 정보
     isbn = Column(String(13), unique=True, nullable=False, index=True)
     title = Column(String(500), nullable=False)
+    author = Column(String(200))  # 저자 (알라딘 API)
     publisher_id = Column(Integer, ForeignKey('publishers.id'), index=True)
 
     # 가격

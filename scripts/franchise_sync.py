@@ -146,6 +146,7 @@ class FranchiseSync:
             book = Book(
                 isbn=isbn,
                 title=item["title"],
+                author=item.get("author", ""),
                 publisher_id=matched_pub.id,
                 list_price=item["original_price"],
                 year=item.get("year"),
@@ -311,6 +312,7 @@ class FranchiseSync:
                 book = Book(
                     isbn=isbn,
                     title=item["title"],
+                    author=item.get("author", ""),
                     publisher_id=publisher.id,
                     list_price=item["original_price"],
                     year=item.get("year"),
